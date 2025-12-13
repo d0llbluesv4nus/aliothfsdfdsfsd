@@ -1,0 +1,154 @@
+name: Port ROM for Poco F3 (Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stock_url:
+        description: 'Прямая ссылка на STOCK Fastboot ROM (Poco F3)'
+        required: true
+      port_url:
+        description: 'Прямая ссылка на PORT Fastboot ROM (Donor)'
+        required: true
+      rom_name:
+        description: 'Имя для zip архива (без пробелов)'
+        required: false
+        default: 'Alioth_Hybrid_Port'
+
+# Важно: права на запись для создания релизов
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils
+
+      - name: Download Firmwares
+        run: |
+          mkdir -p workspace/stock workspace/port
+          cd workspace
+          echo "Downloading Stock..."
+          aria2c -x16 -s16 "${{ inputs.stock_url }}" -d stock -o stock.tgz
+          echo "Downloading Port..."
+          aria2c -x16 -s16 "${{ inputs.port_url }}" -d port -o port.tgz
+
+      - name: Extract Images
+        run: |
+          cd workspace
+          echo "Extracting archives..."
+          # Извлекаем только нужные образы, чтобы сэкономить место и время
+          tar -xf stock/stock.tgz -C stock --wildcards '*/images/boot.img' --wildcards '*/images/vendor.img' --wildcards '*/images/product.img' --wildcards '*/images/dtbo.img' --wildcards '*/images/vbmeta.img' --strip-components=2
+          tar -xf port/port.tgz -C port --wildcards '*/images/system.img' --wildcards '*/images/system_ext.img' --wildcards '*/images/product.img' --wildcards '*/images/mi_ext.img' --strip-components=2 || true
+          
+          # Проверка на существование mi_ext (не во всех прошивках есть)
+          if [ ! -f port/images/mi_ext.img ]; then echo "mi_ext not found, skipping"; fi
+
+      - name: Patch Product Partition
+        run: |
+          cd workspace
+          
+          # 1. Распаковка
+          extract.erofs -i stock/images/product.img -x -o stock_product_extracted
+          extract.erofs -i port/images/product.img -x -o port_product_extracted
+
+          # 2. Device Features (Alioth)
+          TARGET_DIR="port_product_extracted/etc/device_features"
+          SOURCE_FILE="stock_product_extracted/etc/device_features/alioth.xml"
+          
+          if [ -f "$SOURCE_FILE" ]; then
+             mkdir -p "$TARGET_DIR"
+             cp "$SOURCE_FILE" "$TARGET_DIR/"
+             find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+          fi
+
+          # 3. Overlays
+          OVERLAY_SRC="stock_product_extracted/overlay/AospFrameworkResOverlay.apk"
+          OVERLAY_DST="port_product_extracted/overlay/AospFrameworkResOverlay.apk"
+          if [ -f "$OVERLAY_SRC" ]; then cp "$OVERLAY_SRC" "$OVERLAY_DST"; fi
+
+          # 4. Build.prop mods
+          PROP_FILE="port_product_extracted/build.prop"
+          echo >> "$PROP_FILE"
+          echo "# Ported via GitHub Actions" >> "$PROP_FILE"
+          echo "ro.product.product.name=alioth" >> "$PROP_FILE"
+          echo "ro.product.product.device=alioth" >> "$PROP_FILE"
+          echo "ro.product.product.model=M2012K11AC" >> "$PROP_FILE"
+          
+          # 5. Сборка Product
+          rm port/images/product.img
+          mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product port/images/product.img port_product_extracted
+
+      - name: Pack Final ZIP
+        id: pack
+        run: |
+          cd workspace
+          mkdir -p final_rom/images
+          
+          # Собираем файлы
+          cp port/images/system.img final_rom/images/
+          cp port/images/system_ext.img final_rom/images/
+          [ -f port/images/mi_ext.img ] && cp port/images/mi_ext.img final_rom/images/
+          cp port/images/product.img final_rom/images/
+          
+          cp stock/images/boot.img final_rom/images/
+          cp stock/images/vendor.img final_rom/images/
+          [ -f stock/images/dtbo.img ] && cp stock/images/dtbo.img final_rom/images/
+          [ -f stock/images/vbmeta.img ] && cp stock/images/vbmeta.img final_rom/images/
+
+          # Скрипт прошивки (Flash Script)
+          cat <<EOF > final_rom/Flash_ROM.bat
+          @echo off
+          echo Flashing Port ROM...
+          fastboot flash boot images/boot.img
+          fastboot flash dtbo images/dtbo.img
+          fastboot flash vendor images/vendor.img
+          fastboot flash system images/system.img
+          fastboot flash system_ext images/system_ext.img
+          fastboot flash product images/product.img
+          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
+          echo Done. Rebooting...
+          fastboot reboot
+          pause
+          EOF
+          
+          # Создаем ZIP
+          cd final_rom
+          ZIP_NAME="${{ inputs.rom_name }}.zip"
+          7z a -tzip -mx5 "$ZIP_NAME" .
+          
+          # Сохраняем путь к файлу для следующего шага
+          echo "ZIP_PATH=$(pwd)/$ZIP_NAME" >> $GITHUB_ENV
+          
+          # Генерируем имя тега (дата-время)
+          echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+          
+          # Генерируем описание релиза
+          echo "RELEASE_BODY=Stock Source: ${{ inputs.stock_url }} <br> Port Source: ${{ inputs.port_url }}" >> $GITHUB_ENV
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v1
+        if: success()
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Alioth Port ${{ env.RELEASE_TAG }}
+          body: |
+            Automatic Port for Poco F3 (Alioth)
+            
+            **Sources:**
+            * Stock: ${{ inputs.stock_url }}
+            * Port: ${{ inputs.port_url }}
+            
+            **Instructions:**
+            1. Unzip the archive.
+            2. Reboot phone to Fastboot.
+            3. Run `Flash_ROM.bat`.
+            *(Ensure you have patched vbmeta or disabled verification if needed)*
+          files: ${{ env.ZIP_PATH }}
