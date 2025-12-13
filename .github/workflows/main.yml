@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Smart Format Detect)
+name: Port ROM for Poco F3 (Low Disk Usage)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка места
+      # 1. Очистка (Обязательно)
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,18 +37,18 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов
+      # 2. Инструменты
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
           
-          echo ">>> Installing lpunpack (LineageOS)..."
+          # lpunpack (LineageOS)
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          echo ">>> Compiling EROFS Utils..."
+          # EROFS Utils (Source)
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -57,182 +57,144 @@ jobs:
           sudo make install
           cd ..
           rm -rf erofs-utils
-          
-          echo "SUCCESS: Tools ready."
 
-      - name: Prepare Workspace
-        run: mkdir -p workspace/images workspace/temp_extract
+      - name: Prepare Dirs
+        run: |
+          mkdir -p workspace/final_rom/images
+          mkdir -p workspace/assets_to_patch
+          mkdir -p workspace/temp
 
-      # 3. СТОК
-      - name: Process Stock ROM
+      # 3. ОБРАБОТКА СТОКА (HARVEST & DELETE)
+      - name: Harvest Stock Files
         run: |
           cd workspace
-          ARIA_ARGS="-x4 -s4 --check-certificate=false --max-tries=5 --retry-wait=10"
-          
           echo ">>> Downloading Stock..."
-          aria2c $ARIA_ARGS "${{ inputs.stock_url }}" -o stock.tgz
+          aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
           
           echo ">>> Extracting Stock..."
-          7z x stock.tgz -o./temp_extract -y
-          if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
+          7z x stock.tgz -o./temp -y
+          if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
-          find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
-          find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
+          # 1. Сохраняем загрузочные файлы в финал
+          echo ">>> Saving boot/vendor..."
+          find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
+          find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
+          find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
           
-          SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
-          
+          # 2. Достаем Product для патча
+          SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
-             echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
-             lpunpack super.raw images/
-             
-             # БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ (фикс проблемы пустых слотов A/B)
-             find images -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/stock_product.img
-             find images -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/vendor.img
-             
-             rm super.raw
+             lpunpack super.raw .
+             find . -name "product*.img" -exec mv {} product.img \;
+             find . -name "vendor*.img" -exec mv {} final_rom/images/vendor.img \;
           else
-             echo ">>> No super.img found..."
-             find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
-             find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
+             find temp -type f -name "product.img" -exec mv {} product.img \;
+             find temp -type f -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
           fi
-
-          echo ">>> Cleaning up Stock..."
-          rm stock.tgz
-          rm -rf temp_extract/*
           
-          if [ ! -s images/stock_product.img ]; then echo "CRITICAL: Stock Product not found or empty!"; exit 1; fi
+          # 3. Распаковываем Product, забираем конфиги и УДАЛЯЕМ ВСЁ ОСТАЛЬНОЕ
+          echo ">>> Extracting configs from Stock Product..."
+          if [ -f product.img ]; then
+             TYPE=$(file -b product.img)
+             if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=stock_extracted product.img; else 7z x product.img -ostock_extracted; fi
+             
+             # Копируем alioth.xml
+             XML=$(find stock_extracted -name "alioth.xml" | head -n 1)
+             if [ -f "$XML" ]; then cp "$XML" assets_to_patch/; fi
+             
+             # Копируем Overlay
+             OVL=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
+             if [ -f "$OVL" ]; then cp "$OVL" assets_to_patch/; fi
+          fi
+          
+          echo ">>> DELETING STOCK FILES TO SAVE SPACE..."
+          rm -rf stock.tgz temp super.raw product.img stock_extracted
+          df -h
 
-      # 4. ПОРТ
-      - name: Process Port ROM
+      # 4. ОБРАБОТКА ПОРТА (PATCH & REPACK)
+      - name: Process Port & Patch
         run: |
           cd workspace
-          ARIA_ARGS="-x4 -s4 --check-certificate=false --max-tries=5 --retry-wait=10"
-          
           echo ">>> Downloading Port..."
-          aria2c $ARIA_ARGS "${{ inputs.port_url }}" -o port.tgz
+          aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
           
           echo ">>> Extracting Port..."
-          7z x port.tgz -o./temp_extract -y
-          if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
+          7z x port.tgz -o./temp -y
+          if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
-          
+          SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
-             echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
-             lpunpack super.raw images/
+             lpunpack super.raw .
              
-             # Берем самые большие файлы (игнорируем пустые слоты)
-             find images -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/system.img
-             find images -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/system_ext.img
-             find images -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/port_product.img
-             find images -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/mi_ext.img || true
+             # Перемещаем system, system_ext в финал
+             find . -name "system*.img" -not -name "*ext*" -exec mv {} final_rom/images/system.img \;
+             find . -name "system_ext*.img" -exec mv {} final_rom/images/system_ext.img \;
+             find . -name "mi_ext*.img" -exec mv {} final_rom/images/mi_ext.img \; || true
+             find . -name "product*.img" -exec mv {} product.img \;
              
              rm super.raw
           else
-             find temp_extract -type f -name "system.img" -exec mv {} images/ \;
-             find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
-             find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
-             find temp_extract -type f -name "mi_ext.img" -exec mv {} images/ \;
-          fi
-
-          echo ">>> Cleaning up Port..."
-          rm port.tgz
-          rm -rf temp_extract
-
-      # 5. СБОРКА (SMART EXTRACT)
-      - name: Patch Product Partition
-        run: |
-          cd workspace/images
-          
-          if [ ! -s "stock_product.img" ] || [ ! -s "port_product.img" ]; then
-             echo "ERROR: Images missing or empty!"
-             ls -lh
-             exit 1
-          fi
-
-          # Функция умной распаковки
-          smart_extract() {
-            IMG=$1
-            OUT=$2
-            TYPE=$(file -b "$IMG")
-            echo "Detected type for $IMG: $TYPE"
-            
-            if [[ "$TYPE" == *"EROFS"* ]]; then
-               echo "-> Extracting as EROFS..."
-               fsck.erofs --extract="$OUT" "$IMG"
-            elif [[ "$TYPE" == *"ext4"* ]]; then
-               echo "-> Extracting as EXT4 (using 7z)..."
-               7z x "$IMG" -o"$OUT"
-            else
-               echo "-> Unknown type! Trying EROFS default..."
-               fsck.erofs --extract="$OUT" "$IMG"
-            fi
-          }
-
-          echo ">>> Unpacking Images..."
-          smart_extract "stock_product.img" "stock_extracted"
-          smart_extract "port_product.img" "port_extracted"
-
-          echo ">>> Copying Features..."
-          TARGET_DIR="port_extracted/etc/device_features"
-          # Ищем alioth.xml везде, так как в ext4 путь может отличаться
-          SOURCE_FILE=$(find stock_extracted -name "alioth.xml" | head -n 1)
-          
-          if [ -f "$SOURCE_FILE" ]; then
-             mkdir -p "$TARGET_DIR"
-             cp "$SOURCE_FILE" "$TARGET_DIR/"
-             # Удаляем лишние xml
-             find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
-             echo "Features copied."
-          else
-             echo "WARNING: alioth.xml NOT FOUND in stock image!"
-          fi
-
-          echo ">>> Swapping Overlays..."
-          OVERLAY_SRC=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
-          OVERLAY_DST="port_extracted/overlay/AospFrameworkResOverlay.apk"
-          if [ -f "$OVERLAY_SRC" ] && [ -d "port_extracted/overlay" ]; then
-             cp "$OVERLAY_SRC" "$OVERLAY_DST"
-             echo "Overlay swapped."
-          fi
-
-          echo ">>> Modifying build.prop..."
-          PROP=$(find port_extracted -name "build.prop" | head -n 1)
-          if [ -f "$PROP" ]; then
-             echo >> "$PROP"
-             echo "ro.product.product.name=alioth" >> "$PROP"
-             echo "ro.product.product.device=alioth" >> "$PROP"
-             echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+             find temp -type f -name "system.img" -exec mv {} final_rom/images/ \;
+             find temp -type f -name "system_ext.img" -exec mv {} final_rom/images/ \;
+             find temp -type f -name "mi_ext.img" -exec mv {} final_rom/images/ \;
+             find temp -type f -name "product.img" -exec mv {} product.img \;
           fi
           
-          echo ">>> Repacking Product to EROFS..."
-          rm port_product.img stock_product.img
-          # Всегда пакуем обратно в EROFS (стандарт для F3 HyperOS)
-          mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product product.img port_extracted
+          # Очищаем архив порта сразу
+          rm -rf port.tgz temp
           
-          rm -rf stock_extracted port_extracted
+          # ПАТЧИНГ
+          echo ">>> Patching Port Product..."
+          if [ -f product.img ]; then
+             # Распаковка
+             TYPE=$(file -b product.img)
+             if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=port_extracted product.img; else 7z x product.img -oport_extracted; fi
+             rm product.img # Удаляем образ, работаем с папкой
+             
+             # Копируем сохраненные файлы стока
+             if [ -f assets_to_patch/alioth.xml ]; then
+                TARGET_DIR="port_extracted/etc/device_features"
+                mkdir -p "$TARGET_DIR"
+                cp assets_to_patch/alioth.xml "$TARGET_DIR/"
+                find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+             fi
+             
+             if [ -f assets_to_patch/AospFrameworkResOverlay.apk ]; then
+                cp assets_to_patch/AospFrameworkResOverlay.apk port_extracted/overlay/ || true
+             fi
+             
+             # Build.prop
+             PROP=$(find port_extracted -name "build.prop" | head -n 1)
+             if [ -f "$PROP" ]; then
+                echo >> "$PROP"
+                echo "ro.product.product.name=alioth" >> "$PROP"
+                echo "ro.product.product.device=alioth" >> "$PROP"
+                echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+             fi
+             
+             # Сборка обратно в EROFS
+             echo ">>> Repacking..."
+             mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
+             rm -rf port_extracted assets_to_patch
+          fi
 
       - name: Pack Final ZIP
         id: pack
         run: |
-          cd workspace
-          mkdir -p final_rom
-          mv images/*.img final_rom/
+          cd workspace/final_rom
           
-          cd final_rom
           cat <<EOF > Flash_ROM.bat
           @echo off
           echo Flashing Port ROM...
-          fastboot flash boot boot.img
-          fastboot flash dtbo dtbo.img
-          fastboot flash vendor vendor.img
-          fastboot flash system system.img
-          fastboot flash system_ext system_ext.img
-          fastboot flash product product.img
-          if exist mi_ext.img fastboot flash mi_ext mi_ext.img
+          fastboot flash boot images/boot.img
+          fastboot flash dtbo images/dtbo.img
+          fastboot flash vendor images/vendor.img
+          fastboot flash system images/system.img
+          fastboot flash system_ext images/system_ext.img
+          fastboot flash product images/product.img
+          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
           echo Done. Rebooting...
           fastboot reboot
           pause
