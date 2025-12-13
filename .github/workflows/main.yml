@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Official Tools Syntax)
+name: Port ROM for Poco F3 (Smart Format Detect)
 
 on:
   workflow_dispatch:
@@ -37,37 +37,28 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (СБОРКА ИЗ ИСХОДНИКОВ)
+      # 2. Установка инструментов
       - name: Install Tools
         run: |
           sudo apt-get update
-          # Устанавливаем библиотеки (lz4 и uuid обязательны для erofs)
-          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
+          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
           
           echo ">>> Installing lpunpack (LineageOS)..."
-          ARIA_ARGS="--allow-overwrite=true --check-certificate=false"
-          aria2c $ARIA_ARGS -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
+          aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          echo ">>> Compiling EROFS Utils from Source..."
+          echo ">>> Compiling EROFS Utils..."
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
-          # Конфигурируем с поддержкой LZ4 (важно для Xiaomi)
           ./configure --enable-lz4
           make
           sudo make install
           cd ..
           rm -rf erofs-utils
           
-          # Проверка установки
-          echo ">>> Verifying tools..."
-          if ! command -v lpunpack >/dev/null; then echo "CRITICAL: lpunpack failed"; exit 1; fi
-          # В официальном пакете распаковщик называется fsck.erofs
-          if ! command -v fsck.erofs >/dev/null; then echo "CRITICAL: fsck.erofs failed (erofs-utils install error)"; exit 1; fi
-          if ! command -v mkfs.erofs >/dev/null; then echo "CRITICAL: mkfs.erofs failed"; exit 1; fi
-          echo "SUCCESS: All tools installed and working!"
+          echo "SUCCESS: Tools ready."
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
@@ -96,8 +87,9 @@ jobs:
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw images/
              
-             find images -name "product*.img" -exec mv {} images/stock_product.img \;
-             find images -name "vendor*.img" -exec mv {} images/vendor.img \;
+             # БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ (фикс проблемы пустых слотов A/B)
+             find images -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/stock_product.img
+             find images -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/vendor.img
              
              rm super.raw
           else
@@ -110,7 +102,7 @@ jobs:
           rm stock.tgz
           rm -rf temp_extract/*
           
-          if [ ! -f images/stock_product.img ]; then echo "CRITICAL: Stock Product not found!"; exit 1; fi
+          if [ ! -s images/stock_product.img ]; then echo "CRITICAL: Stock Product not found or empty!"; exit 1; fi
 
       # 4. ПОРТ
       - name: Process Port ROM
@@ -132,14 +124,14 @@ jobs:
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw images/
              
-             find images -name "system*.img" -not -name "*ext*" -exec mv {} images/system.img \;
-             find images -name "system_ext*.img" -exec mv {} images/system_ext.img \;
-             find images -name "product*.img" -exec mv {} images/port_product.img \;
-             find images -name "mi_ext*.img" -exec mv {} images/mi_ext.img \; || true
+             # Берем самые большие файлы (игнорируем пустые слоты)
+             find images -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/system.img
+             find images -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/system_ext.img
+             find images -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/port_product.img
+             find images -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} images/mi_ext.img || true
              
              rm super.raw
           else
-             echo ">>> No super.img found..."
              find temp_extract -type f -name "system.img" -exec mv {} images/ \;
              find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
@@ -150,45 +142,75 @@ jobs:
           rm port.tgz
           rm -rf temp_extract
 
-      # 5. СБОРКА (ИЗМЕНЕНА ЛОГИКА РАСПАКОВКИ)
+      # 5. СБОРКА (SMART EXTRACT)
       - name: Patch Product Partition
         run: |
           cd workspace/images
           
-          if [ ! -f "stock_product.img" ] || [ ! -f "port_product.img" ]; then
-             echo "ERROR: Images missing!"
+          if [ ! -s "stock_product.img" ] || [ ! -s "port_product.img" ]; then
+             echo "ERROR: Images missing or empty!"
              ls -lh
              exit 1
           fi
 
-          echo ">>> Unpacking EROFS (using Official fsck.erofs)..."
-          # Используем fsck.erofs --extract вместо extract.erofs
-          fsck.erofs --extract=stock_extracted stock_product.img
-          fsck.erofs --extract=port_extracted port_product.img
+          # Функция умной распаковки
+          smart_extract() {
+            IMG=$1
+            OUT=$2
+            TYPE=$(file -b "$IMG")
+            echo "Detected type for $IMG: $TYPE"
+            
+            if [[ "$TYPE" == *"EROFS"* ]]; then
+               echo "-> Extracting as EROFS..."
+               fsck.erofs --extract="$OUT" "$IMG"
+            elif [[ "$TYPE" == *"ext4"* ]]; then
+               echo "-> Extracting as EXT4 (using 7z)..."
+               7z x "$IMG" -o"$OUT"
+            else
+               echo "-> Unknown type! Trying EROFS default..."
+               fsck.erofs --extract="$OUT" "$IMG"
+            fi
+          }
+
+          echo ">>> Unpacking Images..."
+          smart_extract "stock_product.img" "stock_extracted"
+          smart_extract "port_product.img" "port_extracted"
 
           echo ">>> Copying Features..."
           TARGET_DIR="port_extracted/etc/device_features"
-          SOURCE_FILE="stock_extracted/etc/device_features/alioth.xml"
+          # Ищем alioth.xml везде, так как в ext4 путь может отличаться
+          SOURCE_FILE=$(find stock_extracted -name "alioth.xml" | head -n 1)
+          
           if [ -f "$SOURCE_FILE" ]; then
              mkdir -p "$TARGET_DIR"
              cp "$SOURCE_FILE" "$TARGET_DIR/"
+             # Удаляем лишние xml
              find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+             echo "Features copied."
+          else
+             echo "WARNING: alioth.xml NOT FOUND in stock image!"
           fi
 
           echo ">>> Swapping Overlays..."
-          OVERLAY_SRC="stock_extracted/overlay/AospFrameworkResOverlay.apk"
+          OVERLAY_SRC=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
           OVERLAY_DST="port_extracted/overlay/AospFrameworkResOverlay.apk"
-          if [ -f "$OVERLAY_SRC" ]; then cp "$OVERLAY_SRC" "$OVERLAY_DST"; fi
+          if [ -f "$OVERLAY_SRC" ] && [ -d "port_extracted/overlay" ]; then
+             cp "$OVERLAY_SRC" "$OVERLAY_DST"
+             echo "Overlay swapped."
+          fi
 
           echo ">>> Modifying build.prop..."
-          echo >> "port_extracted/build.prop"
-          echo "ro.product.product.name=alioth" >> "port_extracted/build.prop"
-          echo "ro.product.product.device=alioth" >> "port_extracted/build.prop"
-          echo "ro.product.product.model=M2012K11AC" >> "port_extracted/build.prop"
+          PROP=$(find port_extracted -name "build.prop" | head -n 1)
+          if [ -f "$PROP" ]; then
+             echo >> "$PROP"
+             echo "ro.product.product.name=alioth" >> "$PROP"
+             echo "ro.product.product.device=alioth" >> "$PROP"
+             echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+          fi
           
-          echo ">>> Repacking Product..."
+          echo ">>> Repacking Product to EROFS..."
           rm port_product.img stock_product.img
-          # mkfs.erofs работает стандартно
+          # Всегда пакуем обратно в EROFS (стандарт для F3 HyperOS)
           mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product product.img port_extracted
           
           rm -rf stock_extracted port_extracted
