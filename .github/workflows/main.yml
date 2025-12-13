@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Low Disk Usage)
+name: Port ROM for Poco F3 (Split Archive Fix)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка (Обязательно)
+      # 1. Очистка места
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,18 +37,18 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Инструменты
+      # 2. Установка инструментов
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
           
-          # lpunpack (LineageOS)
+          # lpunpack
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # EROFS Utils (Source)
+          # EROFS Utils
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -64,7 +64,7 @@ jobs:
           mkdir -p workspace/assets_to_patch
           mkdir -p workspace/temp
 
-      # 3. ОБРАБОТКА СТОКА (HARVEST & DELETE)
+      # 3. СТОК
       - name: Harvest Stock Files
         run: |
           cd workspace
@@ -75,13 +75,11 @@ jobs:
           7z x stock.tgz -o./temp -y
           if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          # 1. Сохраняем загрузочные файлы в финал
-          echo ">>> Saving boot/vendor..."
+          # Забираем файлы
           find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
           
-          # 2. Достаем Product для патча
           SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
@@ -93,26 +91,22 @@ jobs:
              find temp -type f -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
           fi
           
-          # 3. Распаковываем Product, забираем конфиги и УДАЛЯЕМ ВСЁ ОСТАЛЬНОЕ
-          echo ">>> Extracting configs from Stock Product..."
+          # Распаковка Product для конфигов
           if [ -f product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=stock_extracted product.img; else 7z x product.img -ostock_extracted; fi
              
-             # Копируем alioth.xml
              XML=$(find stock_extracted -name "alioth.xml" | head -n 1)
              if [ -f "$XML" ]; then cp "$XML" assets_to_patch/; fi
              
-             # Копируем Overlay
              OVL=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
              if [ -f "$OVL" ]; then cp "$OVL" assets_to_patch/; fi
           fi
           
-          echo ">>> DELETING STOCK FILES TO SAVE SPACE..."
+          echo ">>> DELETING STOCK..."
           rm -rf stock.tgz temp super.raw product.img stock_extracted
-          df -h
 
-      # 4. ОБРАБОТКА ПОРТА (PATCH & REPACK)
+      # 4. ПОРТ
       - name: Process Port & Patch
         run: |
           cd workspace
@@ -127,13 +121,10 @@ jobs:
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw .
-             
-             # Перемещаем system, system_ext в финал
              find . -name "system*.img" -not -name "*ext*" -exec mv {} final_rom/images/system.img \;
              find . -name "system_ext*.img" -exec mv {} final_rom/images/system_ext.img \;
              find . -name "mi_ext*.img" -exec mv {} final_rom/images/mi_ext.img \; || true
              find . -name "product*.img" -exec mv {} product.img \;
-             
              rm super.raw
           else
              find temp -type f -name "system.img" -exec mv {} final_rom/images/ \;
@@ -142,18 +133,14 @@ jobs:
              find temp -type f -name "product.img" -exec mv {} product.img \;
           fi
           
-          # Очищаем архив порта сразу
           rm -rf port.tgz temp
           
-          # ПАТЧИНГ
-          echo ">>> Patching Port Product..."
+          # Патчинг
           if [ -f product.img ]; then
-             # Распаковка
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=port_extracted product.img; else 7z x product.img -oport_extracted; fi
-             rm product.img # Удаляем образ, работаем с папкой
+             rm product.img
              
-             # Копируем сохраненные файлы стока
              if [ -f assets_to_patch/alioth.xml ]; then
                 TARGET_DIR="port_extracted/etc/device_features"
                 mkdir -p "$TARGET_DIR"
@@ -165,7 +152,6 @@ jobs:
                 cp assets_to_patch/AospFrameworkResOverlay.apk port_extracted/overlay/ || true
              fi
              
-             # Build.prop
              PROP=$(find port_extracted -name "build.prop" | head -n 1)
              if [ -f "$PROP" ]; then
                 echo >> "$PROP"
@@ -174,13 +160,11 @@ jobs:
                 echo "ro.product.product.model=M2012K11AC" >> "$PROP"
              fi
              
-             # Сборка обратно в EROFS
-             echo ">>> Repacking..."
              mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
              rm -rf port_extracted assets_to_patch
           fi
 
-      - name: Pack Final ZIP
+      - name: Pack Final ZIP (SPLIT)
         id: pack
         run: |
           cd workspace/final_rom
@@ -201,9 +185,11 @@ jobs:
           EOF
           
           ZIP_NAME="${{ inputs.rom_name }}.zip"
-          7z a -tzip -mx1 "$ZIP_NAME" .
           
-          echo "ZIP_PATH=$(pwd)/$ZIP_NAME" >> $GITHUB_ENV
+          # --- ГЛАВНОЕ ИЗМЕНЕНИЕ ---
+          # -v2000m: Разбивает архив на тома по 2000 МБ (GitHub лимит 2ГБ)
+          7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
+          
           echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - name: Create Release and Upload
@@ -215,4 +201,11 @@ jobs:
           body: |
             Automatic Port for Poco F3
             Base: ${{ inputs.port_url }}
-          files: ${{ env.ZIP_PATH }}
+            
+            **INSTRUCTIONS:**
+            Because the file is >2GB, it is split into parts.
+            1. Download ALL parts (.001, .002, etc).
+            2. Open the first file (.001) with 7-Zip/WinRAR.
+            3. Extract.
+          # Используем wildcard (*) чтобы загрузить все части архива (.zip.001, .zip.002...)
+          files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
