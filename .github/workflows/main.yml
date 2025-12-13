@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Compile Everything)
+name: Port ROM for Poco F3 (Official Tools Syntax)
 
 on:
   workflow_dispatch:
@@ -41,24 +41,22 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update
-          # Устанавливаем библиотеки для компиляции (lz4, lzma, autoconf и т.д.)
+          # Устанавливаем библиотеки (lz4 и uuid обязательны для erofs)
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
           
-          echo ">>> Installing lpunpack (Official LineageOS)..."
+          echo ">>> Installing lpunpack (LineageOS)..."
           ARIA_ARGS="--allow-overwrite=true --check-certificate=false"
           aria2c $ARIA_ARGS -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
           echo ">>> Compiling EROFS Utils from Source..."
-          # Клонируем официальный репозиторий
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
-          # Конфигурируем и собираем
           ./autogen.sh
-          ./configure
+          # Конфигурируем с поддержкой LZ4 (важно для Xiaomi)
+          ./configure --enable-lz4
           make
-          # Устанавливаем в систему
           sudo make install
           cd ..
           rm -rf erofs-utils
@@ -66,7 +64,8 @@ jobs:
           # Проверка установки
           echo ">>> Verifying tools..."
           if ! command -v lpunpack >/dev/null; then echo "CRITICAL: lpunpack failed"; exit 1; fi
-          if ! command -v extract.erofs >/dev/null; then echo "CRITICAL: extract.erofs failed"; exit 1; fi
+          # В официальном пакете распаковщик называется fsck.erofs
+          if ! command -v fsck.erofs >/dev/null; then echo "CRITICAL: fsck.erofs failed (erofs-utils install error)"; exit 1; fi
           if ! command -v mkfs.erofs >/dev/null; then echo "CRITICAL: mkfs.erofs failed"; exit 1; fi
           echo "SUCCESS: All tools installed and working!"
 
@@ -151,7 +150,7 @@ jobs:
           rm port.tgz
           rm -rf temp_extract
 
-      # 5. СБОРКА
+      # 5. СБОРКА (ИЗМЕНЕНА ЛОГИКА РАСПАКОВКИ)
       - name: Patch Product Partition
         run: |
           cd workspace/images
@@ -162,9 +161,10 @@ jobs:
              exit 1
           fi
 
-          echo ">>> Unpacking EROFS..."
-          extract.erofs -i stock_product.img -x -o stock_extracted
-          extract.erofs -i port_product.img -x -o port_extracted
+          echo ">>> Unpacking EROFS (using Official fsck.erofs)..."
+          # Используем fsck.erofs --extract вместо extract.erofs
+          fsck.erofs --extract=stock_extracted stock_product.img
+          fsck.erofs --extract=port_extracted port_product.img
 
           echo ">>> Copying Features..."
           TARGET_DIR="port_extracted/etc/device_features"
@@ -188,6 +188,7 @@ jobs:
           
           echo ">>> Repacking Product..."
           rm port_product.img stock_product.img
+          # mkfs.erofs работает стандартно
           mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product product.img port_extracted
           
           rm -rf stock_extracted port_extracted
