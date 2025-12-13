@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Phhusson Method)
+name: Port ROM for Poco F3 (Xpirt Method)
 
 on:
   workflow_dispatch:
@@ -37,56 +37,54 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (PHHUSSON SOURCE + ARCHIVE.ORG)
+      # 2. Установка инструментов (XPIRT SOURCE)
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          echo ">>> Attempting to fetch imjtool source..."
+          echo ">>> Downloading imjtool source..."
           
-          # Самый надежный источник: репозиторий Phhusson (отец Treble GSI)
-          URL_PHH="https://raw.githubusercontent.com/phhusson/sas-creator/master/imjtool.c"
+          # Используем репозиторий Xpirt (Разработчик с XDA, очень надежный)
+          # Также добавляем запасные зеркала
+          URL_MAIN="https://raw.githubusercontent.com/xpirt/imjtool/master/imjtool.c"
+          URL_BACKUP="https://raw.githubusercontent.com/SmartPack/imjtool/master/imjtool.c"
           
-          # Запасной вариант: Internet Archive (Вечная ссылка)
-          URL_ARCHIVE="https://web.archive.org/web/20230315150000if_/https://raw.githubusercontent.com/Androides/imjtool/master/imjtool.c"
-          
-          # Пробуем скачать Phhusson
-          if curl -L -o imjtool.c "$URL_PHH"; then
-             echo "Downloaded from Phhusson repo."
-          elif curl -L -o imjtool.c "$URL_ARCHIVE"; then
-             echo "Downloaded from Wayback Machine."
+          # Пытаемся скачать (флаг -f заставляет curl падать при ошибке 404, а не качать страницу ошибки)
+          if curl -f -L -o imjtool.c "$URL_MAIN"; then
+             echo "Downloaded from Xpirt."
+          elif curl -f -L -o imjtool.c "$URL_BACKUP"; then
+             echo "Downloaded from SmartPack."
           else
-             echo "CRITICAL: Failed to download source code."
+             echo "CRITICAL: All mirrors failed. GitHub is having issues."
              exit 1
           fi
-          
-          # Проверка, что скачался текст (код), а не html ошибка
-          if grep -q "<html" imjtool.c; then
-             echo "ERROR: Downloaded file is HTML (probably 404 page), not C code."
-             cat imjtool.c
+
+          # ФИНАЛЬНАЯ ПРОВЕРКА: Если файл содержит HTML теги, значит это не C-код
+          if grep -q "<!DOCTYPE html>" imjtool.c; then
+             echo "ERROR: Downloaded file is HTML garbage!"
              exit 1
           fi
 
           echo ">>> Compiling imjtool..."
+          # Компилируем
           if gcc -o imjtool imjtool.c -lz; then
               echo "Compilation successful!"
           else
-              echo "ERROR: Compilation failed."
+              echo "ERROR: Compilation failed. Invalid C code."
               exit 1
           fi
           
-          # Установка
+          # Устанавливаем
           chmod +x imjtool
           sudo mv imjtool /usr/local/bin/
           rm imjtool.c
           
-          # Проверка работы
-          if imjtool; then
-             echo "SUCCESS: imjtool is working."
-          else
-             # imjtool без аргументов возвращает не 0, поэтому игнорируем, если он запустился и вывел help
-             echo "imjtool binary exists."
+          # Проверка
+          if command -v imjtool >/dev/null; then 
+              echo "SUCCESS: imjtool installed!"
+          else 
+              exit 1
           fi
 
       - name: Prepare Workspace
