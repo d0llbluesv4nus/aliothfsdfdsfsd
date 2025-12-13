@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Fixed EROFS)
+name: Port ROM for Poco F3 (Compile Everything)
 
 on:
   workflow_dispatch:
@@ -37,34 +37,38 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (ВСЕ БИНАРНИКИ ВРУЧНУЮ)
+      # 2. Установка инструментов (СБОРКА ИЗ ИСХОДНИКОВ)
       - name: Install Tools
         run: |
           sudo apt-get update
-          # Убираем erofs-utils из apt, так как там старая версия
-          sudo apt-get install -y aria2 python3 p7zip-full android-sdk-libsparse-utils
+          # Устанавливаем библиотеки для компиляции (lz4, lzma, autoconf и т.д.)
+          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
           
-          echo ">>> Installing lpunpack (LineageOS)..."
+          echo ">>> Installing lpunpack (Official LineageOS)..."
           ARIA_ARGS="--allow-overwrite=true --check-certificate=false"
           aria2c $ARIA_ARGS -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          echo ">>> Installing EROFS Tools (Static Binaries)..."
-          # Скачиваем extract.erofs и mkfs.erofs вручную, так как в apt их нет
-          aria2c $ARIA_ARGS -o extract.erofs "https://raw.githubusercontent.com/VegaBobo/erofs-utils/master/extract.erofs"
-          aria2c $ARIA_ARGS -o mkfs.erofs "https://raw.githubusercontent.com/VegaBobo/erofs-utils/master/mkfs.erofs"
-          
-          chmod +x extract.erofs mkfs.erofs
-          sudo mv extract.erofs /usr/local/bin/
-          sudo mv mkfs.erofs /usr/local/bin/
+          echo ">>> Compiling EROFS Utils from Source..."
+          # Клонируем официальный репозиторий
+          git clone https://github.com/erofs/erofs-utils.git
+          cd erofs-utils
+          # Конфигурируем и собираем
+          ./autogen.sh
+          ./configure
+          make
+          # Устанавливаем в систему
+          sudo make install
+          cd ..
+          rm -rf erofs-utils
           
           # Проверка установки
           echo ">>> Verifying tools..."
-          if ! command -v lpunpack >/dev/null; then echo "ERROR: lpunpack failed"; exit 1; fi
-          if ! command -v extract.erofs >/dev/null; then echo "ERROR: extract.erofs failed"; exit 1; fi
-          if ! command -v mkfs.erofs >/dev/null; then echo "ERROR: mkfs.erofs failed"; exit 1; fi
-          echo "All tools installed successfully!"
+          if ! command -v lpunpack >/dev/null; then echo "CRITICAL: lpunpack failed"; exit 1; fi
+          if ! command -v extract.erofs >/dev/null; then echo "CRITICAL: extract.erofs failed"; exit 1; fi
+          if ! command -v mkfs.erofs >/dev/null; then echo "CRITICAL: mkfs.erofs failed"; exit 1; fi
+          echo "SUCCESS: All tools installed and working!"
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
