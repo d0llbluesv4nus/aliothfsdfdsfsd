@@ -1,13 +1,13 @@
-name: Port ROM for Poco F3 (Stable Release)
+name: Port ROM for Poco F3 (Max Space Optimized)
 
 on:
   workflow_dispatch:
     inputs:
       stock_url:
-        description: 'Прямая ссылка на STOCK Fastboot ROM (Poco F3)'
+        description: 'Ссылка на STOCK Fastboot ROM (Poco F3)'
         required: true
       port_url:
-        description: 'Прямая ссылка на PORT Fastboot ROM (Donor)'
+        description: 'Ссылка на PORT Fastboot ROM (Donor)'
         required: true
       rom_name:
         description: 'Имя для zip архива'
@@ -25,148 +25,155 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # --- ЭТАП 1: ОЧИСТКА МЕСТА (КРИТИЧЕСКИ ВАЖНО) ---
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # Удаляем ненужный софт, чтобы освободить ~30GB
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils
 
-      - name: Download Firmwares (Stable Mode)
-        run: |
-          mkdir -p workspace/stock workspace/port
-          cd workspace
-          
-          # Настройки для более стабильного скачивания с серверов Xiaomi
-          # -x4: Меньше потоков (было 16, сервер мог банить)
-          # --max-tries=5: 5 попыток скачать, если обрыв
-          # --retry-wait=10: ждать 10 секунд перед повтором
-          ARIA_ARGS="-x4 -s4 --check-certificate=false --max-tries=5 --retry-wait=10 --continue=true"
+      - name: Prepare Workspace
+        run: mkdir -p workspace/images workspace/temp_extract
 
-          echo "Downloading Stock..."
-          aria2c $ARIA_ARGS "${{ inputs.stock_url }}" -d stock -o stock.tgz
-          
-          echo "Downloading Port..."
-          aria2c $ARIA_ARGS "${{ inputs.port_url }}" -d port -o port.tgz
-          
-          # Проверка размера файлов (не пустые ли они)
-          if [ ! -s stock/stock.tgz ] || [ ! -s port/port.tgz ]; then
-            echo "ERROR: Download failed (empty file). Check URLs!"
-            exit 1
-          fi
-
-      - name: Extract Images (7-Zip Method)
+      # --- ЭТАП 2: РАБОТА СО СТОКОМ (СКАЧАЛ -> РАСПАКОВАЛ -> УДАЛИЛ АРХИВ) ---
+      - name: Process Stock ROM
         run: |
           cd workspace
+          ARIA_ARGS="-x4 -s4 --check-certificate=false --max-tries=5 --retry-wait=10"
           
-          echo ">>> Extracting Stock with 7z..."
-          cd stock
-          # 7z распакует любой архив (zip/tgz), игнорируя ошибки структуры если возможно
-          7z x stock.tgz -y
-          # Если внутри был еще один tar (часто бывает в tgz)
-          if ls *.tar 1> /dev/null 2>&1; then 7z x *.tar -y; fi
-          cd ..
+          echo ">>> Downloading Stock..."
+          aria2c $ARIA_ARGS "${{ inputs.stock_url }}" -o stock.tgz
           
-          echo ">>> Extracting Port with 7z..."
-          cd port
-          7z x port.tgz -y
-          if ls *.tar 1> /dev/null 2>&1; then 7z x *.tar -y; fi
-          cd ..
+          echo ">>> Extracting Stock..."
+          # Распаковываем во временную папку
+          7z x stock.tgz -o./temp_extract -y
+          # Если внутри есть еще tar, распаковываем его тоже
+          if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
+          
+          echo ">>> Moving Stock Images..."
+          # Находим и забираем только нужные файлы в папку images
+          find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
+          find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
+          find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
+          find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
+          
+          # Если файл product.img в стоке нужен для патчинга, сохраняем его временно как stock_product.img
+          find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
 
-          echo ">>> Finding and moving images..."
-          # Эта магия найдет файлы где угодно (в любой подпапке) и вытащит их в корень
-          find stock -type f -name "boot.img" -exec mv {} stock/ \;
-          find stock -type f -name "vendor.img" -exec mv {} stock/ \;
-          find stock -type f -name "product.img" -exec mv {} stock/ \;
-          find stock -type f -name "dtbo.img" -exec mv {} stock/ \;
-          find stock -type f -name "vbmeta.img" -exec mv {} stock/ \;
+          echo ">>> Cleaning up Stock..."
+          # Удаляем архив и распакованные файлы стока, чтобы освободить место для порта
+          rm stock.tgz
+          rm -rf temp_extract/*
+          
+          echo "Current Disk Space:"
+          df -h
 
-          find port -type f -name "system.img" -exec mv {} port/ \;
-          find port -type f -name "system_ext.img" -exec mv {} port/ \;
-          find port -type f -name "product.img" -exec mv {} port/ \;
-          find port -type f -name "mi_ext.img" -exec mv {} port/ \;
+      # --- ЭТАП 3: РАБОТА С ПОРТОМ (СКАЧАЛ -> РАСПАКОВАЛ -> УДАЛИЛ АРХИВ) ---
+      - name: Process Port ROM
+        run: |
+          cd workspace
+          ARIA_ARGS="-x4 -s4 --check-certificate=false --max-tries=5 --retry-wait=10"
+          
+          echo ">>> Downloading Port..."
+          aria2c $ARIA_ARGS "${{ inputs.port_url }}" -o port.tgz
+          
+          echo ">>> Extracting Port..."
+          7z x port.tgz -o./temp_extract -y
+          if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
+          
+          echo ">>> Moving Port Images..."
+          find temp_extract -type f -name "system.img" -exec mv {} images/ \;
+          find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
+          find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
+          find temp_extract -type f -name "mi_ext.img" -exec mv {} images/ \;
 
-          echo ">>> Verifying extracted files..."
-          if [ ! -f stock/boot.img ]; then echo "ERROR: boot.img missing in Stock!"; exit 1; fi
-          if [ ! -f port/system.img ]; then echo "ERROR: system.img missing in Port!"; exit 1; fi
+          echo ">>> Cleaning up Port..."
+          rm port.tgz
+          rm -rf temp_extract
+          
+          echo "Current Disk Space:"
+          df -h
 
       - name: Patch Product Partition
         run: |
-          cd workspace
+          cd workspace/images
           
-          # Распаковка EROFS
-          extract.erofs -i stock/product.img -x -o stock_product_extracted
-          extract.erofs -i port/product.img -x -o port_product_extracted
+          # Проверка наличия файлов
+          if [ ! -f "stock_product.img" ] || [ ! -f "port_product.img" ]; then
+             echo "ERROR: Product images missing!"
+             ls -lh
+             exit 1
+          fi
 
-          # Device Features (Alioth)
-          TARGET_DIR="port_product_extracted/etc/device_features"
-          SOURCE_FILE="stock_product_extracted/etc/device_features/alioth.xml"
-          
+          echo ">>> Unpacking EROFS..."
+          extract.erofs -i stock_product.img -x -o stock_extracted
+          extract.erofs -i port_product.img -x -o port_extracted
+
+          echo ">>> Copying Features..."
+          # Device Features
+          TARGET_DIR="port_extracted/etc/device_features"
+          SOURCE_FILE="stock_extracted/etc/device_features/alioth.xml"
           if [ -f "$SOURCE_FILE" ]; then
              mkdir -p "$TARGET_DIR"
              cp "$SOURCE_FILE" "$TARGET_DIR/"
-             # Удаляем лишние xml, оставляем только alioth
              find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
-          else
-             echo "WARNING: alioth.xml not found! Skipping copy."
           fi
 
-          # Overlays swap
-          OVERLAY_SRC="stock_product_extracted/overlay/AospFrameworkResOverlay.apk"
-          OVERLAY_DST="port_product_extracted/overlay/AospFrameworkResOverlay.apk"
+          # Overlays
+          OVERLAY_SRC="stock_extracted/overlay/AospFrameworkResOverlay.apk"
+          OVERLAY_DST="port_extracted/overlay/AospFrameworkResOverlay.apk"
           if [ -f "$OVERLAY_SRC" ]; then cp "$OVERLAY_SRC" "$OVERLAY_DST"; fi
 
-          # Build.prop mods
-          PROP_FILE="port_product_extracted/build.prop"
-          if [ -f "$PROP_FILE" ]; then
-            echo >> "$PROP_FILE"
-            echo "# Ported via GitHub Actions" >> "$PROP_FILE"
-            echo "ro.product.product.name=alioth" >> "$PROP_FILE"
-            echo "ro.product.product.device=alioth" >> "$PROP_FILE"
-            echo "ro.product.product.model=M2012K11AC" >> "$PROP_FILE"
-          fi
+          # Build.prop
+          echo >> "port_extracted/build.prop"
+          echo "ro.product.product.name=alioth" >> "port_extracted/build.prop"
+          echo "ro.product.product.device=alioth" >> "port_extracted/build.prop"
+          echo "ro.product.product.model=M2012K11AC" >> "port_extracted/build.prop"
           
-          # Repack Product
-          # Удаляем старый и собираем новый
-          rm port/product.img
-          mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product port/product.img port_product_extracted
+          echo ">>> Repacking Product..."
+          mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product product.img port_extracted
+          
+          # Удаляем временные папки распаковки для экономии места перед zip
+          rm -rf stock_extracted port_extracted stock_product.img port_product.img
 
       - name: Pack Final ZIP
         id: pack
         run: |
           cd workspace
-          mkdir -p final_rom/images
+          mkdir -p final_rom
+          mv images/*.img final_rom/
           
-          # Собираем файлы в кучу
-          cp port/system.img final_rom/images/
-          cp port/system_ext.img final_rom/images/
-          [ -f port/mi_ext.img ] && cp port/mi_ext.img final_rom/images/
-          cp port/product.img final_rom/images/
-          
-          cp stock/boot.img final_rom/images/
-          cp stock/vendor.img final_rom/images/
-          [ -f stock/dtbo.img ] && cp stock/dtbo.img final_rom/images/
-          [ -f stock/vbmeta.img ] && cp stock/vbmeta.img final_rom/images/
-
+          cd final_rom
           # Скрипт прошивки
-          cat <<EOF > final_rom/Flash_ROM.bat
+          cat <<EOF > Flash_ROM.bat
           @echo off
           echo Flashing Port ROM...
-          fastboot flash boot images/boot.img
-          fastboot flash dtbo images/dtbo.img
-          fastboot flash vendor images/vendor.img
-          fastboot flash system images/system.img
-          fastboot flash system_ext images/system_ext.img
-          fastboot flash product images/product.img
-          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
+          fastboot flash boot boot.img
+          fastboot flash dtbo dtbo.img
+          fastboot flash vendor vendor.img
+          fastboot flash system system.img
+          fastboot flash system_ext system_ext.img
+          fastboot flash product product.img
+          if exist mi_ext.img fastboot flash mi_ext mi_ext.img
           echo Done. Rebooting...
           fastboot reboot
           pause
           EOF
           
-          # Создаем ZIP
-          cd final_rom
           ZIP_NAME="${{ inputs.rom_name }}.zip"
-          # Используем -mx3 для скорости, так как файлы уже сжаты (img)
-          7z a -tzip -mx3 "$ZIP_NAME" .
+          # -mx1 самое быстрое сжатие (экономит время, файлы и так сжаты)
+          7z a -tzip -mx1 "$ZIP_NAME" .
           
           echo "ZIP_PATH=$(pwd)/$ZIP_NAME" >> $GITHUB_ENV
           echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
@@ -178,6 +185,5 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
-            Automatic Port for Poco F3
             Base: ${{ inputs.port_url }}
           files: ${{ env.ZIP_PATH }}
