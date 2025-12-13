@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Working Imjtool)
+name: Port ROM for Poco F3 (Working Tools)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка места
+      # 1. Очистка места (30GB+)
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,26 +37,25 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (ПРОВЕРЕННЫЙ РЕПОЗИТОРИЙ)
+      # 2. Установка инструментов (СКАЧИВАНИЕ .C ФАЙЛА НАПРЯМУЮ)
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
+          sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          echo ">>> Cloning imjtool from reliable source..."
-          # Используем репозиторий idoybh - это проверенный форк
-          git clone https://github.com/idoybh/imjtool.git
+          echo ">>> Downloading imjtool source..."
+          # Используем репозиторий TadiT7 (активный разработчик)
+          # Скачиваем RAW файл, чтобы не мучиться с git clone
+          wget https://raw.githubusercontent.com/TadiT7/imjtool/master/imjtool.c -O imjtool.c
           
-          cd imjtool
-          echo ">>> Compiling..."
-          # Компилируем
+          echo ">>> Compiling imjtool..."
+          # Компилируем с поддержкой zlib
           gcc -o imjtool imjtool.c -lz
           
           # Устанавливаем
           chmod +x imjtool
           sudo mv imjtool /usr/local/bin/
-          cd ..
-          rm -rf imjtool
+          rm imjtool.c
           
           # Проверка
           if command -v imjtool >/dev/null; then 
@@ -82,7 +81,7 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # Обычные файлы
+          # Обычные файлы (не в super)
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
@@ -92,13 +91,16 @@ jobs:
           
           if [ -f "$SUPER_IMG" ]; then
              echo ">>> Super partition detected. Unpacking..."
+             # Конвертируем Sparse -> Raw
              simg2img "$SUPER_IMG" super.raw
              
              mkdir super_extracted
              cd super_extracted
+             # Распаковываем
              imjtool ../super.raw extract
              
              echo ">>> Moving partitions..."
+             # Находим Product и Vendor (игнорируем суффиксы типа _a)
              find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
              find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
              cd ..
