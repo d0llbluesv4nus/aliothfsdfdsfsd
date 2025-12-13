@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Direct Compile)
+name: Port ROM for Poco F3 (Final Fix)
 
 on:
   workflow_dispatch:
@@ -37,25 +37,29 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка и компиляция (ИСПРАВЛЕНО)
+      # 2. Установка инструментов (ZIP METHOD - Самый надежный)
       - name: Install Tools
         run: |
           sudo apt-get update
-          # Важно: добавляем zlib1g-dev для компиляции
-          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
+          sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          echo ">>> Downloading imjtool source code directly..."
-          # Скачиваем файл напрямую, без git clone (это 100% работает)
-          wget https://raw.githubusercontent.com/erfanoabdi/imjtool/master/imjtool.c
+          echo ">>> Downloading imjtool source (ZIP)..."
+          # Скачиваем ZIP, чтобы избежать ошибок git clone и 404
+          wget https://github.com/Androides/imjtool/archive/refs/heads/master.zip -O imjtool.zip
           
-          echo ">>> Compiling imjtool..."
-          # Компилируем с библиотекой zlib (-lz)
+          echo ">>> Unzipping..."
+          unzip imjtool.zip
+          cd imjtool-master
+          
+          echo ">>> Compiling..."
+          # Компилируем
           gcc -o imjtool imjtool.c -lz
           
           # Устанавливаем
           chmod +x imjtool
           sudo mv imjtool /usr/local/bin/
-          rm imjtool.c
+          cd ..
+          rm -rf imjtool-master imjtool.zip
           
           # Проверка
           if command -v imjtool >/dev/null; then 
@@ -138,7 +142,7 @@ jobs:
              imjtool ../super.raw extract
              
              echo ">>> Moving partitions..."
-             # Исключаем system_ext из поиска system, чтобы не перепутать
+             # Исключаем system_ext из поиска system
              find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
              find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
              find . -name "product*.img" -exec mv {} ../images/port_product.img \;
