@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Build Tools from Source)
+name: Port ROM for Poco F3 (Imjtool Method)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # --- ЭТАП 1: ОЧИСТКА МЕСТА ---
+      # 1. Очистка места (30GB+)
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,36 +37,29 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Install Tools (Robust Method)
+      # 2. Установка инструментов (IMJTOOL вместо lpunpack)
+      - name: Install Tools
         run: |
           sudo apt-get update
-          # Устанавливаем необходимые библиотеки для сборки
-          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
+          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential
           
-          # --- СБОРКА LPUNPACK ИЗ ИСХОДНИКОВ ---
-          # Это гарантирует, что 404 ошибки больше не будет
-          echo "Building lpunpack from source..."
-          git clone https://github.com/LonelyFool/lpunpack_and_lpmake.git
-          cd lpunpack_and_lpmake
-          # Компилируем (gcc)
-          gcc -Iinclude lpunpack.c -o lpunpack
-          chmod +x lpunpack
-          sudo mv lpunpack /usr/local/bin/
+          # Компилируем imjtool (этот репозиторий прост и надежен)
+          echo "Building imjtool..."
+          git clone https://github.com/Androides/imjtool.git
+          cd imjtool
+          # Компилируем простой C-файл
+          gcc -o imjtool imjtool.c
+          sudo mv imjtool /usr/local/bin/
           cd ..
-          rm -rf lpunpack_and_lpmake
+          rm -rf imjtool
           
-          # Проверка установки
-          if command -v lpunpack >/dev/null; then
-              echo "lpunpack successfully installed!"
-          else
-              echo "ERROR: lpunpack compilation failed."
-              exit 1
-          fi
+          # Проверяем
+          if command -v imjtool >/dev/null; then echo "imjtool installed!"; else exit 1; fi
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
 
-      # --- ЭТАП 2: СТОК ---
+      # 3. СТОК
       - name: Process Stock ROM
         run: |
           cd workspace
@@ -75,31 +68,36 @@ jobs:
           echo ">>> Downloading Stock..."
           aria2c $ARIA_ARGS "${{ inputs.stock_url }}" -o stock.tgz
           
-          echo ">>> Extracting Stock Archive..."
+          echo ">>> Extracting Stock..."
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # Обычные файлы
+          # Забираем простые файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # Super img
+          # Ищем super.img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
-             echo ">>> Super partition detected at $SUPER_IMG"
-             echo "Converting sparse super image to raw..."
+             echo ">>> Super partition detected. Unpacking with imjtool..."
+             # Конвертируем в raw (imjtool иногда требует этого)
              simg2img "$SUPER_IMG" super.raw
              
-             echo "Unpacking Vendor and Product from super.raw..."
-             lpunpack -p product super.raw images/ 
-             mv images/product.img images/stock_product.img
-             lpunpack -p vendor super.raw images/
+             # imjtool распаковывает ВСЕ разделы в текущую папку
+             mkdir super_extracted
+             cd super_extracted
+             imjtool ../super.raw extract
              
-             rm super.raw
+             # Забираем Product и Vendor (ищем по маске, т.к. может быть product_a.img)
+             echo "Moving partitions..."
+             find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
+             find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
+             cd ..
+             rm -rf super_extracted super.raw
           else
-             echo ">>> No super.img found, searching for individual images..."
+             echo ">>> No super.img found, searching individual images..."
              find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
           fi
@@ -110,7 +108,7 @@ jobs:
           
           if [ ! -f images/stock_product.img ]; then echo "CRITICAL: Stock Product not found!"; exit 1; fi
 
-      # --- ЭТАП 3: ПОРТ ---
+      # 4. ПОРТ
       - name: Process Port ROM
         run: |
           cd workspace
@@ -119,27 +117,30 @@ jobs:
           echo ">>> Downloading Port..."
           aria2c $ARIA_ARGS "${{ inputs.port_url }}" -o port.tgz
           
-          echo ">>> Extracting Port Archive..."
+          echo ">>> Extracting Port..."
           7z x port.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
-             echo ">>> Super partition detected at $SUPER_IMG"
-             echo "Converting sparse super image to raw..."
+             echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
              
-             echo "Unpacking System, Product, Mi_ext from super.raw..."
-             lpunpack -p system super.raw images/
-             lpunpack -p system_ext super.raw images/
-             lpunpack -p product super.raw images/
-             mv images/product.img images/port_product.img
-             lpunpack -p mi_ext super.raw images/ || true
+             mkdir super_extracted
+             cd super_extracted
+             imjtool ../super.raw extract
              
-             rm super.raw
+             echo "Moving partitions..."
+             find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
+             find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
+             find . -name "product*.img" -exec mv {} ../images/port_product.img \;
+             find . -name "mi_ext*.img" -exec mv {} ../images/mi_ext.img \; || true
+             
+             cd ..
+             rm -rf super_extracted super.raw
           else
-             echo ">>> No super.img found, searching for individual images..."
+             echo ">>> No super.img found..."
              find temp_extract -type f -name "system.img" -exec mv {} images/ \;
              find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
@@ -150,13 +151,14 @@ jobs:
           rm port.tgz
           rm -rf temp_extract
 
-      # --- ЭТАП 4: СБОРКА ---
+      # 5. СБОРКА ОБРАЗА
       - name: Patch Product Partition
         run: |
           cd workspace/images
           
           if [ ! -f "stock_product.img" ] || [ ! -f "port_product.img" ]; then
-             echo "ERROR: Product images missing!"
+             echo "ERROR: Images missing!"
+             ls -lh
              exit 1
           fi
 
