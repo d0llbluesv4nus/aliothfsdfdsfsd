@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Fixed lpunpack)
+name: Port ROM for Poco F3 (Build Tools from Source)
 
 on:
   workflow_dispatch:
@@ -37,16 +37,31 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      - name: Install Tools
+      - name: Install Tools (Robust Method)
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils
+          # Устанавливаем необходимые библиотеки для сборки
+          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-          # Используем стабильную ссылку на lpunpack от разработчика GSI (Ponces)
-          wget https://github.com/ponces/treble_build_pe/raw/thirteen/lpunpack
+          # --- СБОРКА LPUNPACK ИЗ ИСХОДНИКОВ ---
+          # Это гарантирует, что 404 ошибки больше не будет
+          echo "Building lpunpack from source..."
+          git clone https://github.com/LonelyFool/lpunpack_and_lpmake.git
+          cd lpunpack_and_lpmake
+          # Компилируем (gcc)
+          gcc -Iinclude lpunpack.c -o lpunpack
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
+          cd ..
+          rm -rf lpunpack_and_lpmake
+          
+          # Проверка установки
+          if command -v lpunpack >/dev/null; then
+              echo "lpunpack successfully installed!"
+          else
+              echo "ERROR: lpunpack compilation failed."
+              exit 1
+          fi
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
@@ -64,12 +79,12 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # 1. Обычные файлы
+          # Обычные файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # 2. Super img
+          # Super img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
