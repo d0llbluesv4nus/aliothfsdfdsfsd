@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Max Space Optimized)
+name: Port ROM for Poco F3 (Super Img Support)
 
 on:
   workflow_dispatch:
@@ -25,11 +25,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # --- ЭТАП 1: ОЧИСТКА МЕСТА (КРИТИЧЕСКИ ВАЖНО) ---
-      - name: Free Disk Space (Ubuntu)
+      # --- ЭТАП 1: ОЧИСТКА И УСТАНОВКА ИНСТРУМЕНТОВ ---
+      - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
-          # Удаляем ненужный софт, чтобы освободить ~30GB
           tool-cache: true
           android: true
           dotnet: true
@@ -42,11 +41,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils
+          
+          # Скачиваем lpunpack для распаковки super.img
+          wget https://github.com/tekifyl/lpunpack_static/raw/master/lpunpack
+          chmod +x lpunpack
+          sudo mv lpunpack /usr/local/bin/
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
 
-      # --- ЭТАП 2: РАБОТА СО СТОКОМ (СКАЧАЛ -> РАСПАКОВАЛ -> УДАЛИЛ АРХИВ) ---
+      # --- ЭТАП 2: СТОК (Обработка SUPER.IMG) ---
       - name: Process Stock ROM
         run: |
           cd workspace
@@ -55,31 +59,44 @@ jobs:
           echo ">>> Downloading Stock..."
           aria2c $ARIA_ARGS "${{ inputs.stock_url }}" -o stock.tgz
           
-          echo ">>> Extracting Stock..."
-          # Распаковываем во временную папку
+          echo ">>> Extracting Stock Archive..."
           7z x stock.tgz -o./temp_extract -y
-          # Если внутри есть еще tar, распаковываем его тоже
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          echo ">>> Moving Stock Images..."
-          # Находим и забираем только нужные файлы в папку images
+          # 1. Забираем обычные файлы (boot, vbmeta и т.д.)
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
-          find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # Если файл product.img в стоке нужен для патчинга, сохраняем его временно как stock_product.img
-          find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
+          # 2. Ищем super.img и распаковываем разделы
+          SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
+          
+          if [ -f "$SUPER_IMG" ]; then
+             echo ">>> Super partition detected at $SUPER_IMG"
+             echo "Converting sparse super image to raw..."
+             simg2img "$SUPER_IMG" super.raw
+             
+             echo "Unpacking Vendor and Product from super.raw..."
+             # Нам нужны только product и vendor от стока
+             lpunpack -p product super.raw images/ 
+             mv images/product.img images/stock_product.img
+             lpunpack -p vendor super.raw images/
+             
+             rm super.raw
+          else
+             echo ">>> No super.img found, searching for individual images..."
+             find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
+             find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
+          fi
 
           echo ">>> Cleaning up Stock..."
-          # Удаляем архив и распакованные файлы стока, чтобы освободить место для порта
           rm stock.tgz
           rm -rf temp_extract/*
           
-          echo "Current Disk Space:"
-          df -h
+          # Проверка
+          if [ ! -f images/stock_product.img ]; then echo "CRITICAL: Stock Product not found!"; exit 1; fi
 
-      # --- ЭТАП 3: РАБОТА С ПОРТОМ (СКАЧАЛ -> РАСПАКОВАЛ -> УДАЛИЛ АРХИВ) ---
+      # --- ЭТАП 3: ПОРТ (Обработка SUPER.IMG) ---
       - name: Process Port ROM
         run: |
           cd workspace
@@ -88,31 +105,48 @@ jobs:
           echo ">>> Downloading Port..."
           aria2c $ARIA_ARGS "${{ inputs.port_url }}" -o port.tgz
           
-          echo ">>> Extracting Port..."
+          echo ">>> Extracting Port Archive..."
           7z x port.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          echo ">>> Moving Port Images..."
-          find temp_extract -type f -name "system.img" -exec mv {} images/ \;
-          find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
-          find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
-          find temp_extract -type f -name "mi_ext.img" -exec mv {} images/ \;
+          # Ищем super.img
+          SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
+          
+          if [ -f "$SUPER_IMG" ]; then
+             echo ">>> Super partition detected at $SUPER_IMG"
+             echo "Converting sparse super image to raw..."
+             simg2img "$SUPER_IMG" super.raw
+             
+             echo "Unpacking System, Product, Mi_ext from super.raw..."
+             lpunpack -p system super.raw images/
+             lpunpack -p system_ext super.raw images/
+             lpunpack -p product super.raw images/
+             mv images/product.img images/port_product.img
+             # mi_ext не всегда существует, пробуем, но игнорируем ошибку
+             lpunpack -p mi_ext super.raw images/ || true
+             
+             rm super.raw
+          else
+             echo ">>> No super.img found, searching for individual images..."
+             find temp_extract -type f -name "system.img" -exec mv {} images/ \;
+             find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
+             find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
+             find temp_extract -type f -name "mi_ext.img" -exec mv {} images/ \;
+          fi
 
           echo ">>> Cleaning up Port..."
           rm port.tgz
           rm -rf temp_extract
-          
-          echo "Current Disk Space:"
-          df -h
 
+      # --- ЭТАП 4: ПОРТИРОВАНИЕ ---
       - name: Patch Product Partition
         run: |
           cd workspace/images
           
-          # Проверка наличия файлов
+          echo ">>> Validating images..."
+          ls -lh
           if [ ! -f "stock_product.img" ] || [ ! -f "port_product.img" ]; then
-             echo "ERROR: Product images missing!"
-             ls -lh
+             echo "ERROR: Product images missing even after super unpacking!"
              exit 1
           fi
 
@@ -121,31 +155,34 @@ jobs:
           extract.erofs -i port_product.img -x -o port_extracted
 
           echo ">>> Copying Features..."
-          # Device Features
           TARGET_DIR="port_extracted/etc/device_features"
           SOURCE_FILE="stock_extracted/etc/device_features/alioth.xml"
           if [ -f "$SOURCE_FILE" ]; then
              mkdir -p "$TARGET_DIR"
              cp "$SOURCE_FILE" "$TARGET_DIR/"
              find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+          else
+             echo "WARNING: alioth.xml not found! Maybe check path manually later."
           fi
 
-          # Overlays
+          echo ">>> Swapping Overlays..."
           OVERLAY_SRC="stock_extracted/overlay/AospFrameworkResOverlay.apk"
           OVERLAY_DST="port_extracted/overlay/AospFrameworkResOverlay.apk"
           if [ -f "$OVERLAY_SRC" ]; then cp "$OVERLAY_SRC" "$OVERLAY_DST"; fi
 
-          # Build.prop
+          echo ">>> Modifying build.prop..."
           echo >> "port_extracted/build.prop"
           echo "ro.product.product.name=alioth" >> "port_extracted/build.prop"
           echo "ro.product.product.device=alioth" >> "port_extracted/build.prop"
           echo "ro.product.product.model=M2012K11AC" >> "port_extracted/build.prop"
           
           echo ">>> Repacking Product..."
+          # Удаляем старый product, чтобы освободить место
+          rm port_product.img stock_product.img
+          # Собираем новый
           mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product product.img port_extracted
           
-          # Удаляем временные папки распаковки для экономии места перед zip
-          rm -rf stock_extracted port_extracted stock_product.img port_product.img
+          rm -rf stock_extracted port_extracted
 
       - name: Pack Final ZIP
         id: pack
@@ -155,7 +192,7 @@ jobs:
           mv images/*.img final_rom/
           
           cd final_rom
-          # Скрипт прошивки
+          # Создаем flash скрипт
           cat <<EOF > Flash_ROM.bat
           @echo off
           echo Flashing Port ROM...
@@ -172,7 +209,6 @@ jobs:
           EOF
           
           ZIP_NAME="${{ inputs.rom_name }}.zip"
-          # -mx1 самое быстрое сжатие (экономит время, файлы и так сжаты)
           7z a -tzip -mx1 "$ZIP_NAME" .
           
           echo "ZIP_PATH=$(pwd)/$ZIP_NAME" >> $GITHUB_ENV
@@ -185,5 +221,6 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
+            Automatic Port for Poco F3 (Super Partition Support)
             Base: ${{ inputs.port_url }}
           files: ${{ env.ZIP_PATH }}
