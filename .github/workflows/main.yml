@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Mirrors Protection)
+name: Port ROM for Poco F3 (Bulletproof Tools)
 
 on:
   workflow_dispatch:
@@ -37,48 +37,65 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (МЕТОД 3 ЗЕРКАЛ)
+      # 2. Установка инструментов (СИСТЕМА ЗЕРКАЛ)
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          echo ">>> Downloading imjtool source code..."
+          echo ">>> Attempting to install lpunpack (Method A: Static Binary)..."
           
-          # Список зеркал (если одно умрет, сработает другое)
-          URL1="https://raw.githubusercontent.com/idoybh/imjtool/master/imjtool.c"
-          URL2="https://raw.githubusercontent.com/VegaBobo/imjtool/master/imjtool.c"
-          URL3="https://raw.githubusercontent.com/n00b69/imjtool/master/imjtool.c"
+          # Список зеркал для lpunpack (бинарник)
+          URLS_BIN=(
+            "https://raw.githubusercontent.com/VegaBobo/lpunpack_static/master/lpunpack"
+            "https://raw.githubusercontent.com/ponces/treble_build_pe/14/lpunpack"
+            "https://raw.githubusercontent.com/khaytsus/Termux_Packages/master/packages/lpunpack/lpunpack"
+          )
           
-          # Пытаемся скачать по очереди
-          if wget $URL1 -O imjtool.c; then
-              echo "Downloaded from Mirror 1"
-          elif wget $URL2 -O imjtool.c; then
-              echo "Downloaded from Mirror 2"
-          elif wget $URL3 -O imjtool.c; then
-              echo "Downloaded from Mirror 3"
-          else
-              echo "CRITICAL ERROR: All mirrors failed!"
-              exit 1
+          INSTALLED=false
+          
+          for URL in "${URLS_BIN[@]}"; do
+            echo "Trying mirror: $URL"
+            if wget -q "$URL" -O lpunpack; then
+              if [ -s lpunpack ]; then
+                 chmod +x lpunpack
+                 sudo mv lpunpack /usr/local/bin/
+                 echo "SUCCESS: Downloaded lpunpack!"
+                 INSTALLED=true
+                 break
+              fi
+            fi
+          done
+
+          # Если бинарник не скачался, пробуем Method B (Компиляция imjtool)
+          if [ "$INSTALLED" = false ]; then
+            echo ">>> Binary download failed. Attempting Method B: Compile imjtool..."
+            
+            URLS_SRC=(
+              "https://raw.githubusercontent.com/Android-S-Porting/imjtool/master/imjtool.c"
+              "https://raw.githubusercontent.com/n00b69/imjtool/master/imjtool.c"
+              "https://web.archive.org/web/20210204104259if_/https://raw.githubusercontent.com/Androides/imjtool/master/imjtool.c"
+            )
+            
+            for URL in "${URLS_SRC[@]}"; do
+              echo "Trying source mirror: $URL"
+              if wget -q "$URL" -O imjtool.c; then
+                 echo "Compiling..."
+                 if gcc -o imjtool imjtool.c -lz; then
+                    chmod +x imjtool
+                    sudo mv imjtool /usr/local/bin/lpunpack # Переименуем в lpunpack для совместимости
+                    echo "SUCCESS: Compiled imjtool!"
+                    INSTALLED=true
+                    break
+                 fi
+              fi
+            done
           fi
           
-          echo ">>> Compiling imjtool..."
-          # Компилируем
-          if gcc -o imjtool imjtool.c -lz; then
-              echo "Compilation successful!"
-          else
-              echo "ERROR: Compilation failed. Content of imjtool.c:"
-              head -n 20 imjtool.c
-              exit 1
+          if [ "$INSTALLED" = false ]; then
+            echo "CRITICAL ERROR: Could not install lpunpack or imjtool from any mirror."
+            exit 1
           fi
-          
-          # Устанавливаем
-          chmod +x imjtool
-          sudo mv imjtool /usr/local/bin/
-          rm imjtool.c
-          
-          # Проверка
-          imjtool || true
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
@@ -96,29 +113,30 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # Обычные файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # Super img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
              echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
              
-             mkdir super_extracted
-             cd super_extracted
-             imjtool ../super.raw extract
+             # lpunpack (или imjtool под его именем) работает
+             # imjtool требует raw, lpunpack умеет и так и так, но raw надежнее
+             lpunpack super.raw images/ || lpunpack super.raw extract # imjtool использует 'extract'
              
-             echo ">>> Moving partitions..."
-             find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
-             find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
-             cd ..
-             rm -rf super_extracted super.raw
+             # Перемещаем, если распаковалось в текущую папку (imjtool)
+             find . -maxdepth 1 -name "*.img" -exec mv {} images/ 2>/dev/null || true
+             
+             echo ">>> Identifying partitions..."
+             find images -name "product*.img" -exec mv {} images/stock_product.img \;
+             find images -name "vendor*.img" -exec mv {} images/vendor.img \;
+             
+             rm super.raw
           else
-             echo ">>> No super.img found, searching individual images..."
+             echo ">>> No super.img found..."
              find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
           fi
@@ -148,20 +166,18 @@ jobs:
              echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
              
-             mkdir super_extracted
-             cd super_extracted
-             imjtool ../super.raw extract
+             lpunpack super.raw images/ || lpunpack super.raw extract
+             find . -maxdepth 1 -name "*.img" -exec mv {} images/ 2>/dev/null || true
              
-             echo ">>> Moving partitions..."
-             find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
-             find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
-             find . -name "product*.img" -exec mv {} ../images/port_product.img \;
-             find . -name "mi_ext*.img" -exec mv {} ../images/mi_ext.img \; || true
+             echo ">>> Identifying partitions..."
+             # Исключаем system_ext из поиска system
+             find images -name "system*.img" -not -name "*ext*" -exec mv {} images/system.img \;
+             find images -name "system_ext*.img" -exec mv {} images/system_ext.img \;
+             find images -name "product*.img" -exec mv {} images/port_product.img \;
+             find images -name "mi_ext*.img" -exec mv {} images/mi_ext.img \; || true
              
-             cd ..
-             rm -rf super_extracted super.raw
+             rm super.raw
           else
-             echo ">>> No super.img found..."
              find temp_extract -type f -name "system.img" -exec mv {} images/ \;
              find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
