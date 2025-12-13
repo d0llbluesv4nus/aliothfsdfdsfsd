@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Split Archive Fix)
+name: Port ROM for Poco F3 (Zero Byte Fix)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка места
+      # 1. Очистка
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,7 +37,7 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов
+      # 2. Инструменты
       - name: Install Tools
         run: |
           sudo apt-get update
@@ -64,7 +64,7 @@ jobs:
           mkdir -p workspace/assets_to_patch
           mkdir -p workspace/temp
 
-      # 3. СТОК
+      # 3. СТОК (ИСПРАВЛЕНО: БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ)
       - name: Harvest Stock Files
         run: |
           cd workspace
@@ -75,24 +75,28 @@ jobs:
           7z x stock.tgz -o./temp -y
           if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          # Забираем файлы
+          # Обычные файлы
           find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
           
+          # Работа с Super.img
           SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw .
-             find . -name "product*.img" -exec mv {} product.img \;
-             find . -name "vendor*.img" -exec mv {} final_rom/images/vendor.img \;
+             
+             # ИЩЕМ САМЫЕ БОЛЬШИЕ ФАЙЛЫ (Чтобы не взять 0 байт)
+             find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} product.img
+             find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/vendor.img
           else
-             find temp -type f -name "product.img" -exec mv {} product.img \;
-             find temp -type f -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
+             # Если не super.img, тоже проверяем размер на всякий случай
+             find temp -name "product.img" -exec mv {} product.img \;
+             find temp -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
           fi
           
-          # Распаковка Product для конфигов
-          if [ -f product.img ]; then
+          # Извлекаем конфиги
+          if [ -s product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=stock_extracted product.img; else 7z x product.img -ostock_extracted; fi
              
@@ -101,12 +105,14 @@ jobs:
              
              OVL=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
              if [ -f "$OVL" ]; then cp "$OVL" assets_to_patch/; fi
+          else
+             echo "WARNING: Stock Product is empty or missing!"
           fi
           
           echo ">>> DELETING STOCK..."
           rm -rf stock.tgz temp super.raw product.img stock_extracted
 
-      # 4. ПОРТ
+      # 4. ПОРТ (ИСПРАВЛЕНО: БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ)
       - name: Process Port & Patch
         run: |
           cd workspace
@@ -121,22 +127,25 @@ jobs:
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw .
-             find . -name "system*.img" -not -name "*ext*" -exec mv {} final_rom/images/system.img \;
-             find . -name "system_ext*.img" -exec mv {} final_rom/images/system_ext.img \;
-             find . -name "mi_ext*.img" -exec mv {} final_rom/images/mi_ext.img \; || true
-             find . -name "product*.img" -exec mv {} product.img \;
+             
+             # ВАЖНО: Сортировка по размеру (sort -n), берем последний (tail -1) - это самый большой файл
+             find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/system.img
+             find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/system_ext.img
+             find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/mi_ext.img || true
+             find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} product.img
+             
              rm super.raw
           else
-             find temp -type f -name "system.img" -exec mv {} final_rom/images/ \;
-             find temp -type f -name "system_ext.img" -exec mv {} final_rom/images/ \;
-             find temp -type f -name "mi_ext.img" -exec mv {} final_rom/images/ \;
-             find temp -type f -name "product.img" -exec mv {} product.img \;
+             find temp -name "system.img" -exec mv {} final_rom/images/ \;
+             find temp -name "system_ext.img" -exec mv {} final_rom/images/ \;
+             find temp -name "mi_ext.img" -exec mv {} final_rom/images/ \;
+             find temp -name "product.img" -exec mv {} product.img \;
           fi
           
           rm -rf port.tgz temp
           
-          # Патчинг
-          if [ -f product.img ]; then
+          # Патчинг Product
+          if [ -s product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=port_extracted product.img; else 7z x product.img -oport_extracted; fi
              rm product.img
@@ -160,8 +169,12 @@ jobs:
                 echo "ro.product.product.model=M2012K11AC" >> "$PROP"
              fi
              
+             echo ">>> Repacking..."
              mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
              rm -rf port_extracted assets_to_patch
+          else
+             echo "CRITICAL ERROR: Port Product image is empty!"
+             exit 1
           fi
 
       - name: Pack Final ZIP (SPLIT)
@@ -185,9 +198,6 @@ jobs:
           EOF
           
           ZIP_NAME="${{ inputs.rom_name }}.zip"
-          
-          # --- ГЛАВНОЕ ИЗМЕНЕНИЕ ---
-          # -v2000m: Разбивает архив на тома по 2000 МБ (GitHub лимит 2ГБ)
           7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
           
           echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
@@ -203,9 +213,7 @@ jobs:
             Base: ${{ inputs.port_url }}
             
             **INSTRUCTIONS:**
-            Because the file is >2GB, it is split into parts.
-            1. Download ALL parts (.001, .002, etc).
+            1. Download ALL parts (.001, .002...).
             2. Open the first file (.001) with 7-Zip/WinRAR.
             3. Extract.
-          # Используем wildcard (*) чтобы загрузить все части архива (.zip.001, .zip.002...)
           files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
