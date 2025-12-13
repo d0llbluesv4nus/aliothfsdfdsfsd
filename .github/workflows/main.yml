@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (LineageOS Tools)
+name: Port ROM for Poco F3 (Fixed EROFS)
 
 on:
   workflow_dispatch:
@@ -37,39 +37,34 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (LINEAGE OS OFFICIAL)
+      # 2. Установка инструментов (ВСЕ БИНАРНИКИ ВРУЧНУЮ)
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils
+          # Убираем erofs-utils из apt, так как там старая версия
+          sudo apt-get install -y aria2 python3 p7zip-full android-sdk-libsparse-utils
           
-          echo ">>> Downloading lpunpack from LineageOS Official Repo..."
+          echo ">>> Installing lpunpack (LineageOS)..."
+          ARIA_ARGS="--allow-overwrite=true --check-certificate=false"
+          aria2c $ARIA_ARGS -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
+          chmod +x lpunpack
+          sudo mv lpunpack /usr/local/bin/
           
-          # Ссылка на официальный бинарник из репозитория LineageOS (linux-x86)
-          # Это самый надежный источник в мире Android моддинга
-          LPUNPACK_URL="https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
+          echo ">>> Installing EROFS Tools (Static Binaries)..."
+          # Скачиваем extract.erofs и mkfs.erofs вручную, так как в apt их нет
+          aria2c $ARIA_ARGS -o extract.erofs "https://raw.githubusercontent.com/VegaBobo/erofs-utils/master/extract.erofs"
+          aria2c $ARIA_ARGS -o mkfs.erofs "https://raw.githubusercontent.com/VegaBobo/erofs-utils/master/mkfs.erofs"
           
-          # Скачиваем с помощью aria2c (он надежнее)
-          aria2c -o lpunpack --allow-overwrite=true --check-certificate=false "$LPUNPACK_URL"
+          chmod +x extract.erofs mkfs.erofs
+          sudo mv extract.erofs /usr/local/bin/
+          sudo mv mkfs.erofs /usr/local/bin/
           
-          # Проверка скачивания
-          if [ -s lpunpack ]; then
-              chmod +x lpunpack
-              sudo mv lpunpack /usr/local/bin/
-              echo "SUCCESS: lpunpack installed from LineageOS!"
-          else
-              echo "ERROR: Failed to download from LineageOS. Trying backup..."
-              # Запасной вариант (PixelExperience)
-              wget https://github.com/PixelExperience/prebuilts_extract-tools/raw/thirteen/linux-x86/bin/lpunpack -O lpunpack
-              chmod +x lpunpack
-              sudo mv lpunpack /usr/local/bin/
-          fi
-          
-          # Финальная проверка работоспособности
-          if ! command -v lpunpack >/dev/null; then
-              echo "CRITICAL ERROR: lpunpack installation failed completely."
-              exit 1
-          fi
+          # Проверка установки
+          echo ">>> Verifying tools..."
+          if ! command -v lpunpack >/dev/null; then echo "ERROR: lpunpack failed"; exit 1; fi
+          if ! command -v extract.erofs >/dev/null; then echo "ERROR: extract.erofs failed"; exit 1; fi
+          if ! command -v mkfs.erofs >/dev/null; then echo "ERROR: mkfs.erofs failed"; exit 1; fi
+          echo "All tools installed successfully!"
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
@@ -87,28 +82,23 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # Обычные файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # Super img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
              echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
-             
-             # Используем lpunpack (теперь он точно есть)
              lpunpack super.raw images/
              
-             # Перемещаем (lpunpack кидает файлы в images/, но может создать подпапки)
              find images -name "product*.img" -exec mv {} images/stock_product.img \;
              find images -name "vendor*.img" -exec mv {} images/vendor.img \;
              
              rm super.raw
           else
-             echo ">>> No super.img found, searching individual images..."
+             echo ">>> No super.img found..."
              find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
           fi
@@ -137,10 +127,8 @@ jobs:
           if [ -f "$SUPER_IMG" ]; then
              echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
-             
              lpunpack super.raw images/
              
-             echo ">>> Identifying partitions..."
              find images -name "system*.img" -not -name "*ext*" -exec mv {} images/system.img \;
              find images -name "system_ext*.img" -exec mv {} images/system_ext.img \;
              find images -name "product*.img" -exec mv {} images/port_product.img \;
