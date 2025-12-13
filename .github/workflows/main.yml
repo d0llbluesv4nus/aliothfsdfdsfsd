@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Xpirt Method)
+name: Port ROM for Poco F3 (LineageOS Tools)
 
 on:
   workflow_dispatch:
@@ -37,53 +37,37 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (XPIRT SOURCE)
+      # 2. Установка инструментов (LINEAGE OS OFFICIAL)
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
+          sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils
           
-          echo ">>> Downloading imjtool source..."
+          echo ">>> Downloading lpunpack from LineageOS Official Repo..."
           
-          # Используем репозиторий Xpirt (Разработчик с XDA, очень надежный)
-          # Также добавляем запасные зеркала
-          URL_MAIN="https://raw.githubusercontent.com/xpirt/imjtool/master/imjtool.c"
-          URL_BACKUP="https://raw.githubusercontent.com/SmartPack/imjtool/master/imjtool.c"
+          # Ссылка на официальный бинарник из репозитория LineageOS (linux-x86)
+          # Это самый надежный источник в мире Android моддинга
+          LPUNPACK_URL="https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           
-          # Пытаемся скачать (флаг -f заставляет curl падать при ошибке 404, а не качать страницу ошибки)
-          if curl -f -L -o imjtool.c "$URL_MAIN"; then
-             echo "Downloaded from Xpirt."
-          elif curl -f -L -o imjtool.c "$URL_BACKUP"; then
-             echo "Downloaded from SmartPack."
+          # Скачиваем с помощью aria2c (он надежнее)
+          aria2c -o lpunpack --allow-overwrite=true --check-certificate=false "$LPUNPACK_URL"
+          
+          # Проверка скачивания
+          if [ -s lpunpack ]; then
+              chmod +x lpunpack
+              sudo mv lpunpack /usr/local/bin/
+              echo "SUCCESS: lpunpack installed from LineageOS!"
           else
-             echo "CRITICAL: All mirrors failed. GitHub is having issues."
-             exit 1
-          fi
-
-          # ФИНАЛЬНАЯ ПРОВЕРКА: Если файл содержит HTML теги, значит это не C-код
-          if grep -q "<!DOCTYPE html>" imjtool.c; then
-             echo "ERROR: Downloaded file is HTML garbage!"
-             exit 1
-          fi
-
-          echo ">>> Compiling imjtool..."
-          # Компилируем
-          if gcc -o imjtool imjtool.c -lz; then
-              echo "Compilation successful!"
-          else
-              echo "ERROR: Compilation failed. Invalid C code."
-              exit 1
+              echo "ERROR: Failed to download from LineageOS. Trying backup..."
+              # Запасной вариант (PixelExperience)
+              wget https://github.com/PixelExperience/prebuilts_extract-tools/raw/thirteen/linux-x86/bin/lpunpack -O lpunpack
+              chmod +x lpunpack
+              sudo mv lpunpack /usr/local/bin/
           fi
           
-          # Устанавливаем
-          chmod +x imjtool
-          sudo mv imjtool /usr/local/bin/
-          rm imjtool.c
-          
-          # Проверка
-          if command -v imjtool >/dev/null; then 
-              echo "SUCCESS: imjtool installed!"
-          else 
+          # Финальная проверка работоспособности
+          if ! command -v lpunpack >/dev/null; then
+              echo "CRITICAL ERROR: lpunpack installation failed completely."
               exit 1
           fi
 
@@ -103,27 +87,28 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
+          # Обычные файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
+          # Super img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
              echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
              
-             mkdir super_extracted
-             cd super_extracted
-             imjtool ../super.raw extract
+             # Используем lpunpack (теперь он точно есть)
+             lpunpack super.raw images/
              
-             echo ">>> Moving partitions..."
-             find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
-             find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
-             cd ..
-             rm -rf super_extracted super.raw
+             # Перемещаем (lpunpack кидает файлы в images/, но может создать подпапки)
+             find images -name "product*.img" -exec mv {} images/stock_product.img \;
+             find images -name "vendor*.img" -exec mv {} images/vendor.img \;
+             
+             rm super.raw
           else
-             echo ">>> No super.img found..."
+             echo ">>> No super.img found, searching individual images..."
              find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/stock_product.img \;
           fi
@@ -153,18 +138,15 @@ jobs:
              echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
              
-             mkdir super_extracted
-             cd super_extracted
-             imjtool ../super.raw extract
+             lpunpack super.raw images/
              
-             echo ">>> Moving partitions..."
-             find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
-             find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
-             find . -name "product*.img" -exec mv {} ../images/port_product.img \;
-             find . -name "mi_ext*.img" -exec mv {} ../images/mi_ext.img \; || true
+             echo ">>> Identifying partitions..."
+             find images -name "system*.img" -not -name "*ext*" -exec mv {} images/system.img \;
+             find images -name "system_ext*.img" -exec mv {} images/system_ext.img \;
+             find images -name "product*.img" -exec mv {} images/port_product.img \;
+             find images -name "mi_ext*.img" -exec mv {} images/mi_ext.img \; || true
              
-             cd ..
-             rm -rf super_extracted super.raw
+             rm super.raw
           else
              echo ">>> No super.img found..."
              find temp_extract -type f -name "system.img" -exec mv {} images/ \;
