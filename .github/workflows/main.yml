@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Bulletproof Tools)
+name: Port ROM for Poco F3 (Phhusson Method)
 
 on:
   workflow_dispatch:
@@ -37,64 +37,56 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (СИСТЕМА ЗЕРКАЛ)
+      # 2. Установка инструментов (PHHUSSON SOURCE + ARCHIVE.ORG)
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          echo ">>> Attempting to install lpunpack (Method A: Static Binary)..."
+          echo ">>> Attempting to fetch imjtool source..."
           
-          # Список зеркал для lpunpack (бинарник)
-          URLS_BIN=(
-            "https://raw.githubusercontent.com/VegaBobo/lpunpack_static/master/lpunpack"
-            "https://raw.githubusercontent.com/ponces/treble_build_pe/14/lpunpack"
-            "https://raw.githubusercontent.com/khaytsus/Termux_Packages/master/packages/lpunpack/lpunpack"
-          )
+          # Самый надежный источник: репозиторий Phhusson (отец Treble GSI)
+          URL_PHH="https://raw.githubusercontent.com/phhusson/sas-creator/master/imjtool.c"
           
-          INSTALLED=false
+          # Запасной вариант: Internet Archive (Вечная ссылка)
+          URL_ARCHIVE="https://web.archive.org/web/20230315150000if_/https://raw.githubusercontent.com/Androides/imjtool/master/imjtool.c"
           
-          for URL in "${URLS_BIN[@]}"; do
-            echo "Trying mirror: $URL"
-            if wget -q "$URL" -O lpunpack; then
-              if [ -s lpunpack ]; then
-                 chmod +x lpunpack
-                 sudo mv lpunpack /usr/local/bin/
-                 echo "SUCCESS: Downloaded lpunpack!"
-                 INSTALLED=true
-                 break
-              fi
-            fi
-          done
-
-          # Если бинарник не скачался, пробуем Method B (Компиляция imjtool)
-          if [ "$INSTALLED" = false ]; then
-            echo ">>> Binary download failed. Attempting Method B: Compile imjtool..."
-            
-            URLS_SRC=(
-              "https://raw.githubusercontent.com/Android-S-Porting/imjtool/master/imjtool.c"
-              "https://raw.githubusercontent.com/n00b69/imjtool/master/imjtool.c"
-              "https://web.archive.org/web/20210204104259if_/https://raw.githubusercontent.com/Androides/imjtool/master/imjtool.c"
-            )
-            
-            for URL in "${URLS_SRC[@]}"; do
-              echo "Trying source mirror: $URL"
-              if wget -q "$URL" -O imjtool.c; then
-                 echo "Compiling..."
-                 if gcc -o imjtool imjtool.c -lz; then
-                    chmod +x imjtool
-                    sudo mv imjtool /usr/local/bin/lpunpack # Переименуем в lpunpack для совместимости
-                    echo "SUCCESS: Compiled imjtool!"
-                    INSTALLED=true
-                    break
-                 fi
-              fi
-            done
+          # Пробуем скачать Phhusson
+          if curl -L -o imjtool.c "$URL_PHH"; then
+             echo "Downloaded from Phhusson repo."
+          elif curl -L -o imjtool.c "$URL_ARCHIVE"; then
+             echo "Downloaded from Wayback Machine."
+          else
+             echo "CRITICAL: Failed to download source code."
+             exit 1
           fi
           
-          if [ "$INSTALLED" = false ]; then
-            echo "CRITICAL ERROR: Could not install lpunpack or imjtool from any mirror."
-            exit 1
+          # Проверка, что скачался текст (код), а не html ошибка
+          if grep -q "<html" imjtool.c; then
+             echo "ERROR: Downloaded file is HTML (probably 404 page), not C code."
+             cat imjtool.c
+             exit 1
+          fi
+
+          echo ">>> Compiling imjtool..."
+          if gcc -o imjtool imjtool.c -lz; then
+              echo "Compilation successful!"
+          else
+              echo "ERROR: Compilation failed."
+              exit 1
+          fi
+          
+          # Установка
+          chmod +x imjtool
+          sudo mv imjtool /usr/local/bin/
+          rm imjtool.c
+          
+          # Проверка работы
+          if imjtool; then
+             echo "SUCCESS: imjtool is working."
+          else
+             # imjtool без аргументов возвращает не 0, поэтому игнорируем, если он запустился и вывел help
+             echo "imjtool binary exists."
           fi
 
       - name: Prepare Workspace
@@ -123,18 +115,15 @@ jobs:
              echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
              
-             # lpunpack (или imjtool под его именем) работает
-             # imjtool требует raw, lpunpack умеет и так и так, но raw надежнее
-             lpunpack super.raw images/ || lpunpack super.raw extract # imjtool использует 'extract'
+             mkdir super_extracted
+             cd super_extracted
+             imjtool ../super.raw extract
              
-             # Перемещаем, если распаковалось в текущую папку (imjtool)
-             find . -maxdepth 1 -name "*.img" -exec mv {} images/ 2>/dev/null || true
-             
-             echo ">>> Identifying partitions..."
-             find images -name "product*.img" -exec mv {} images/stock_product.img \;
-             find images -name "vendor*.img" -exec mv {} images/vendor.img \;
-             
-             rm super.raw
+             echo ">>> Moving partitions..."
+             find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
+             find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
+             cd ..
+             rm -rf super_extracted super.raw
           else
              echo ">>> No super.img found..."
              find temp_extract -type f -name "vendor.img" -exec mv {} images/ \;
@@ -166,18 +155,20 @@ jobs:
              echo ">>> Unpacking Port Super..."
              simg2img "$SUPER_IMG" super.raw
              
-             lpunpack super.raw images/ || lpunpack super.raw extract
-             find . -maxdepth 1 -name "*.img" -exec mv {} images/ 2>/dev/null || true
+             mkdir super_extracted
+             cd super_extracted
+             imjtool ../super.raw extract
              
-             echo ">>> Identifying partitions..."
-             # Исключаем system_ext из поиска system
-             find images -name "system*.img" -not -name "*ext*" -exec mv {} images/system.img \;
-             find images -name "system_ext*.img" -exec mv {} images/system_ext.img \;
-             find images -name "product*.img" -exec mv {} images/port_product.img \;
-             find images -name "mi_ext*.img" -exec mv {} images/mi_ext.img \; || true
+             echo ">>> Moving partitions..."
+             find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
+             find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
+             find . -name "product*.img" -exec mv {} ../images/port_product.img \;
+             find . -name "mi_ext*.img" -exec mv {} ../images/mi_ext.img \; || true
              
-             rm super.raw
+             cd ..
+             rm -rf super_extracted super.raw
           else
+             echo ">>> No super.img found..."
              find temp_extract -type f -name "system.img" -exec mv {} images/ \;
              find temp_extract -type f -name "system_ext.img" -exec mv {} images/ \;
              find temp_extract -type f -name "product.img" -exec mv {} images/port_product.img \;
