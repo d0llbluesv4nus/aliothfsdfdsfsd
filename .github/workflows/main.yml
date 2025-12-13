@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Imjtool Method)
+name: Port ROM for Poco F3 (Direct Compile)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка места (30GB+)
+      # 1. Очистка места
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,24 +37,33 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (IMJTOOL вместо lpunpack)
+      # 2. Установка и компиляция (ИСПРАВЛЕНО)
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential
+          # Важно: добавляем zlib1g-dev для компиляции
+          sudo apt-get install -y aria2 python3 git p7zip-full erofs-utils android-sdk-libsparse-utils build-essential zlib1g-dev
           
-          # Компилируем imjtool (этот репозиторий прост и надежен)
-          echo "Building imjtool..."
-          git clone https://github.com/Androides/imjtool.git
-          cd imjtool
-          # Компилируем простой C-файл
-          gcc -o imjtool imjtool.c
+          echo ">>> Downloading imjtool source code directly..."
+          # Скачиваем файл напрямую, без git clone (это 100% работает)
+          wget https://raw.githubusercontent.com/erfanoabdi/imjtool/master/imjtool.c
+          
+          echo ">>> Compiling imjtool..."
+          # Компилируем с библиотекой zlib (-lz)
+          gcc -o imjtool imjtool.c -lz
+          
+          # Устанавливаем
+          chmod +x imjtool
           sudo mv imjtool /usr/local/bin/
-          cd ..
-          rm -rf imjtool
+          rm imjtool.c
           
-          # Проверяем
-          if command -v imjtool >/dev/null; then echo "imjtool installed!"; else exit 1; fi
+          # Проверка
+          if command -v imjtool >/dev/null; then 
+              echo "SUCCESS: imjtool installed!"
+          else 
+              echo "ERROR: Compilation failed."
+              exit 1
+          fi
 
       - name: Prepare Workspace
         run: mkdir -p workspace/images workspace/temp_extract
@@ -72,26 +81,23 @@ jobs:
           7z x stock.tgz -o./temp_extract -y
           if ls temp_extract/*.tar 1> /dev/null 2>&1; then 7z x temp_extract/*.tar -o./temp_extract -y; fi
           
-          # Забираем простые файлы
+          # Обычные файлы
           find temp_extract -type f -name "boot.img" -exec mv {} images/ \;
           find temp_extract -type f -name "dtbo.img" -exec mv {} images/ \;
           find temp_extract -type f -name "vbmeta.img" -exec mv {} images/ \;
           
-          # Ищем super.img
+          # Super img
           SUPER_IMG=$(find temp_extract -type f -name "super.img" | head -n 1)
           
           if [ -f "$SUPER_IMG" ]; then
-             echo ">>> Super partition detected. Unpacking with imjtool..."
-             # Конвертируем в raw (imjtool иногда требует этого)
+             echo ">>> Super partition detected. Unpacking..."
              simg2img "$SUPER_IMG" super.raw
              
-             # imjtool распаковывает ВСЕ разделы в текущую папку
              mkdir super_extracted
              cd super_extracted
              imjtool ../super.raw extract
              
-             # Забираем Product и Vendor (ищем по маске, т.к. может быть product_a.img)
-             echo "Moving partitions..."
+             echo ">>> Moving partitions..."
              find . -name "product*.img" -exec mv {} ../images/stock_product.img \;
              find . -name "vendor*.img" -exec mv {} ../images/vendor.img \;
              cd ..
@@ -131,7 +137,8 @@ jobs:
              cd super_extracted
              imjtool ../super.raw extract
              
-             echo "Moving partitions..."
+             echo ">>> Moving partitions..."
+             # Исключаем system_ext из поиска system, чтобы не перепутать
              find . -name "system*.img" -not -name "*ext*" -exec mv {} ../images/system.img \;
              find . -name "system_ext*.img" -exec mv {} ../images/system_ext.img \;
              find . -name "product*.img" -exec mv {} ../images/port_product.img \;
@@ -151,7 +158,7 @@ jobs:
           rm port.tgz
           rm -rf temp_extract
 
-      # 5. СБОРКА ОБРАЗА
+      # 5. СБОРКА
       - name: Patch Product Partition
         run: |
           cd workspace/images
