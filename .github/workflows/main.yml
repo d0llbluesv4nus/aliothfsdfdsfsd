@@ -80,7 +80,7 @@ jobs:
 
           SUPER=$(find . -name super.img | head -n1)
           if [ -z "$SUPER" ]; then 
-              echo "❌ super.img не найден после распаковки. Проверьте содержимое архива."
+              echo "❌ super.img не найден после распаковки. Проверьте структуру архива."
               exit 1 
           fi
 
