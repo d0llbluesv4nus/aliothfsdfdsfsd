@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       stock_url:
-        description: 'Ссылка на STOCK Fastboot ROM (Poco F3)'
+        description: 'STOCK Fastboot ROM URL (Poco F3)'
         required: true
       port_url:
-        description: 'Ссылка на PORT Fastboot ROM (Donor)'
+        description: 'PORT Fastboot ROM URL (Donor)'
         required: true
       rom_name:
-        description: 'Имя для zip архива'
+        description: 'ZIP name'
         required: false
         default: 'Alioth_Hybrid_Port'
 
@@ -22,255 +22,157 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
+      - uses: jlumbroso/free-disk-space@main
         with:
-          tool-cache: true
           android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
+          tool-cache: true
           docker-images: true
-          swap-storage: false
 
-      - name: Install Tools
+      - name: Install tools
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file unzip
-          
-          # 1. lpunpack (LineageOS)
-          aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
-          chmod +x lpunpack
-          sudo mv lpunpack /usr/local/bin/
-          
-          # 2. make_ext4fs (Для сборки EXT4 образов) - берем из LineageOS
-          aria2c --allow-overwrite=true --check-certificate=false -o make_ext4fs "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/make_ext4fs"
-          chmod +x make_ext4fs
-          sudo mv make_ext4fs /usr/local/bin/
-          
-          # 3. EROFS Utils
+          sudo apt-get install -y aria2 p7zip-full git file unzip \
+            android-sdk-libsparse-utils build-essential \
+            liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
+
+          # lpunpack
+          aria2c -o lpunpack https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
+          chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
+
+          # erofs-utils
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
-          ./configure --enable-lz4
+          ./configure
           make
           sudo make install
           cd ..
           rm -rf erofs-utils
-          
-          # 4. Magiskboot
-          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O Magisk.apk
-          unzip Magisk.apk -d magisk_files
-          cp magisk_files/lib/x86_64/libmagiskboot.so magiskboot
+
+          # magiskboot (CORRECT)
+          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip Magisk-v27.0.apk -d magisk
+          cp magisk/assets/magiskboot .
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
-          rm -rf Magisk.apk magisk_files
+          rm -rf magisk Magisk-v27.0.apk
 
-      - name: Prepare Dirs
+      - name: Prepare workspace
         run: |
-          mkdir -p workspace/final_rom/images
-          mkdir -p workspace/assets_to_patch
-          mkdir -p workspace/temp
+          set -e
+          mkdir -p workspace/{stock,port,final/images,assets}
 
-      # 3. СТОК: Анализ FS и извлечение ODM
-      - name: Harvest Stock Files
+      # ---------- STOCK ----------
+      - name: Process STOCK
         run: |
-          cd workspace
-          echo ">>> Downloading Stock..."
-          aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
-          
-          echo ">>> Extracting Stock..."
-          7z x stock.tgz -o./temp -y
-          if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
-          
-          # Обычные файлы
-          find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
-          find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
-          find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
-          
-          # SUPER IMG
-          SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
-          if [ -f "$SUPER_IMG" ]; then
-             simg2img "$SUPER_IMG" super.raw
-             lpunpack super.raw .
-             
-             # Ищем самые большие файлы
-             find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} product.img
-             find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/vendor.img
-             # ВАЖНО: Достаем ODM (если есть)
-             find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/odm.img || echo "No ODM found inside super"
-          else
-             find temp -name "product.img" -exec mv {} product.img \;
-             find temp -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
-             find temp -name "odm.img" -exec mv {} final_rom/images/odm.img \; || true
-          fi
-          
-          # ОПРЕДЕЛЕНИЕ ФАЙЛОВОЙ СИСТЕМЫ СТОКА
-          if [ -s product.img ]; then
-             FS_TYPE=$(file -b product.img)
-             if [[ "$FS_TYPE" == *"EROFS"* ]]; then
-                echo "STOCK_FS_TYPE=erofs" >> $GITHUB_ENV
-                echo ">>> DETECTED STOCK FS: EROFS"
-                fsck.erofs --extract=stock_extracted product.img
-             else
-                echo "STOCK_FS_TYPE=ext4" >> $GITHUB_ENV
-                echo ">>> DETECTED STOCK FS: EXT4"
-                7z x product.img -ostock_extracted
-             fi
-             
-             XML=$(find stock_extracted -name "alioth.xml" | head -n 1)
-             if [ -f "$XML" ]; then cp "$XML" assets_to_patch/; fi
-          else
-             echo "WARNING: Stock Product is empty!"
-             # Fallback to EXT4 if failure
-             echo "STOCK_FS_TYPE=ext4" >> $GITHUB_ENV
-          fi
-          
-          rm -rf stock.tgz temp super.raw product.img stock_extracted
+          set -e
+          cd workspace/stock
+          aria2c "${{ inputs.stock_url }}" -o stock.tgz
+          7z x stock.tgz -y
 
-      # 4. ПОРТ + REPACK В НУЖНЫЙ ФОРМАТ
-      - name: Process Port & Repack
+          SUPER=$(find . -name super.img | head -n1)
+          simg2img "$SUPER" super.raw
+          lpunpack super.raw .
+
+          PRODUCT=$(ls product*.img | sort -n | tail -1)
+          FILETYPE=$(file "$PRODUCT")
+
+          if echo "$FILETYPE" | grep -q EROFS; then
+            echo "STOCK_FS=erofs" >> $GITHUB_ENV
+            dump.erofs -x product_fs "$PRODUCT"
+          else
+            echo "STOCK_FS=ext4" >> $GITHUB_ENV
+            7z x "$PRODUCT" -oproduct_fs
+          fi
+
+          XML=$(find product_fs -name alioth.xml | head -n1)
+          [ -f "$XML" ] && cp "$XML" ../assets/
+
+          cp boot.img dtbo.img vbmeta.img ../final/images/ || true
+
+      # ---------- PORT ----------
+      - name: Process PORT
         run: |
-          cd workspace
-          echo ">>> Downloading Port..."
-          aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
-          7z x port.tgz -o./temp -y
-          if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
-          
-          mkdir port_images
-          SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
-          if [ -f "$SUPER_IMG" ]; then
-             simg2img "$SUPER_IMG" super.raw
-             lpunpack super.raw port_images/
-             rm super.raw
-          else
-             find temp -name "*.img" -exec mv {} port_images/ \;
-          fi
-          rm -rf port.tgz temp
-          
-          # Функция пересборки с учетом Detected FS
-          repack_image() {
-             NAME=$1
-             IMG=$(find port_images -name "${NAME}*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}')
-             TARGET_FS="${{ env.STOCK_FS_TYPE }}"
-             
-             if [ -s "$IMG" ]; then
-                echo ">>> Processing $NAME -> Converting to $TARGET_FS..."
-                
-                # 1. Распаковка
-                TYPE=$(file -b "$IMG")
-                if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=extracted_${NAME} "$IMG"; else 7z x "$IMG" -oextracted_${NAME}; fi
-                rm "$IMG"
-                
-                # 2. Патчи и Debloat (только для product)
-                if [ "$NAME" == "product" ]; then
-                   if [ -f assets_to_patch/alioth.xml ]; then
-                      mkdir -p "extracted_product/etc/device_features"
-                      cp assets_to_patch/alioth.xml "extracted_product/etc/device_features/"
-                      find "extracted_product/etc/device_features" -type f -name "*.xml" ! -name "alioth.xml" -delete
-                   fi
-                   
-                   # Debloat
-                   sudo rm -rf extracted_product/data-app/*
-                   sudo rm -rf extracted_product/app/AnalyticsCore
-                   sudo rm -rf extracted_product/app/MSA
-                   sudo rm -rf extracted_product/app/MiVideoGlobal
-                   sudo rm -rf extracted_product/priv-app/Velvet
-                fi
+          set -e
+          cd workspace/port
+          aria2c "${{ inputs.port_url }}" -o port.tgz
+          7z x port.tgz -y
 
-                # 3. Исправление прав
-                sudo chown -R 0:0 extracted_${NAME}
-                sudo chmod -R 755 extracted_${NAME}
-                
-                # 4. СБОРКА В НУЖНЫЙ ФОРМАТ
-                if [ "$TARGET_FS" == "erofs" ]; then
-                    # Сборка в EROFS (LZ4)
-                    sudo mkfs.erofs -zlz4 -C16384 -T 1230768000 --mount-point /${NAME} final_rom/images/${NAME}.img extracted_${NAME}
-                else
-                    # Сборка в EXT4 (Safe Method using make_ext4fs)
-                    # Размер с запасом (3GB для product/system, 1GB для остальных)
-                    SIZE="3072M"
-                    if [ "$NAME" == "mi_ext" ] || [ "$NAME" == "odm" ]; then SIZE="512M"; fi
-                    if [ "$NAME" == "system_ext" ]; then SIZE="1536M"; fi
-                    
-                    # -L (label) -s (sparse) -l (length) -a (mount point)
-                    sudo make_ext4fs -s -L ${NAME} -l $SIZE -a ${NAME} final_rom/images/${NAME}.img extracted_${NAME}/
-                fi
-                
-                sudo rm -rf extracted_${NAME}
-             else
-                echo "Skipping $NAME (not found)"
-             fi
+          SUPER=$(find . -name super.img | head -n1)
+          simg2img "$SUPER" super.raw
+          lpunpack super.raw .
+
+          mkdir extracted
+          
+          repack() {
+            NAME=$1
+            IMG=$(ls ${NAME}*.img 2>/dev/null | sort -n | tail -1 || true)
+            [ -z "$IMG" ] && return
+
+            if file "$IMG" | grep -q EROFS; then
+              dump.erofs -x extracted "$IMG"
+            else
+              7z x "$IMG" -oextracted
+            fi
+
+            if [ "$NAME" = "product" ] && [ -f ../assets/alioth.xml ]; then
+              mkdir -p extracted/etc/device_features
+              cp ../assets/alioth.xml extracted/etc/device_features/
+            fi
+
+            SIZE=$(du -sm extracted | awk '{print $1+300}')M
+
+            if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
+              mkfs.erofs -zlz4 ../final/images/${NAME}.img extracted
+            else
+              make_ext4fs -s -l $SIZE -a $NAME ../final/images/${NAME}.img extracted
+            fi
+
+            rm -rf extracted "$IMG"
           }
-          
-          repack_image "system"
-          repack_image "system_ext"
-          repack_image "product"
-          repack_image "mi_ext"
-          repack_image "odm" # Пробуем найти ODM и в порте, если в стоке не было
 
-      # 5. ПАТЧИНГ BOOT (PERMISSIVE)
-      - name: Patch Boot
-        run: |
-          cd workspace
-          mkdir boot_patch
-          if [ -f final_rom/images/boot.img ]; then
-             mv final_rom/images/boot.img boot_patch/
-             cd boot_patch
-             magiskboot unpack boot.img
-             if [ -f header ]; then
-                sed -i 's/$/ androidboot.selinux=permissive/' header
-             fi
-             magiskboot repack boot.img
-             mv new-boot.img ../final_rom/images/boot.img
-             cd ..
-             rm -rf boot_patch
-          fi
+          for p in system system_ext product vendor odm mi_ext; do
+            repack $p
+          done
 
-      - name: Pack Final ZIP
-        id: pack
+      # ---------- BOOT PATCH ----------
+      - name: Patch boot (permissive)
         run: |
-          cd workspace/final_rom
-          
-          # Генерируем скрипт прошивки динамически (на случай если odm появился/исчез)
-          cat <<EOF > Flash_ROM.bat
-          @echo off
-          echo Flashing Port ROM...
+          set -e
+          cd workspace/final/images
+          magiskboot unpack boot.img
+          magiskboot hexpatch kernel \
+            73656C696E75783D656E666F7263696E67 \
+            73656C696E75783D7065726D697373697665
+          magiskboot repack boot.img
+          mv new-boot.img boot.img
+
+      # ---------- ZIP ----------
+      - name: Pack ZIP
+        run: |
+          set -e
+          cd workspace/final
+          cat <<EOF > flash.bat
           fastboot flash boot images/boot.img
           fastboot flash dtbo images/dtbo.img
           fastboot flash vendor images/vendor.img
-          if exist images\odm.img fastboot flash odm images/odm.img
+          if exist images\\odm.img fastboot flash odm images\\odm.img
           fastboot flash system images/system.img
           fastboot flash system_ext images/system_ext.img
           fastboot flash product images/product.img
-          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
-          echo Done. Rebooting...
           fastboot reboot
-          pause
           EOF
-          
-          ZIP_NAME="${{ inputs.rom_name }}.zip"
-          
-          echo ">>> Zipping with sudo..."
-          sudo 7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
-          sudo chown $USER:$USER "$ZIP_NAME"*
-          
-          echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
-      - name: Create Release and Upload
-        uses: softprops/action-gh-release@v1
-        if: success()
+          ZIP="${{ inputs.rom_name }}.zip"
+          7z a -tzip -mx1 "$ZIP" .
+
+          echo "TAG=v$(date +'%Y.%m.%d-%H%M')-${GITHUB_RUN_ID}" >> $GITHUB_ENV
+
+      - uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: Alioth Port ${{ env.RELEASE_TAG }}
-          body: |
-            **SMART FS & ODM FIX**
-            - Auto-detected FS type from Stock (EXT4/EROFS).
-            - Included ODM partition (fixes mount error).
-            - Debloated & Boot Permissive.
-            
-            Instructions: Download all parts, extract .001, flash.
-          files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
+          tag_name: ${{ env.TAG }}
+          name: Alioth Port ${{ env.TAG }}
+          files: workspace/final/${{ inputs.rom_name }}.zip
