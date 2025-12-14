@@ -41,7 +41,8 @@ jobs:
 
           # lpunpack
           aria2c -o lpunpack https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
-          chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
+          chmod +x lpunpack
+          sudo mv lpunpack /usr/local/bin/
 
           # erofs-utils
           git clone https://github.com/erofs/erofs-utils.git
@@ -53,15 +54,13 @@ jobs:
           cd ..
           rm -rf erofs-utils
 
-          # magiskboot (Magisk 27+ FIXED)
+          # magiskboot (Magisk 27+)
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
-
-          magiskboot --help || magiskboot
 
       # ================= PREP =================
       - name: Prepare workspace
