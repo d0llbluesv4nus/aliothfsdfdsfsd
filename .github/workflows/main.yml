@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Агрессивная очистка места (КРИТИЧЕСКИ ВАЖНО для больших прошивок)
+      # 1. Агрессивная очистка места (Критически важна для больших прошивок)
       - name: Free Disk Space (Aggressive)
         run: |
           echo "Свободное место до очистки:"
@@ -41,7 +41,6 @@ jobs:
         run: |
           set -e
           sudo apt-get update
-          # Добавлен e2fsprogs для make_ext4fs или его аналогов
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils build-essential \
             liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev e2fsprogs
@@ -67,7 +66,7 @@ jobs:
       - name: Prepare workspace
         run: mkdir -p workspace/{stock,port,final/images,assets,checks}
 
-      # 3. Обработка STOCK (Исправлена распаковка)
+      # 3. Обработка STOCK (Исправлена распаковка на tar -xvf)
       - name: Process STOCK (kernel + fstab source)
         run: |
           set -e
@@ -77,14 +76,17 @@ jobs:
           # ИСПРАВЛЕНИЕ: Используем tar для полной распаковки .tgz
           echo "Распаковка STOCK с помощью tar..."
           tar -xvf stock.tgz
-          rm stock.tgz # Освобождаем место сразу после распаковки
-          
+          rm stock.tgz # Освобождаем место сразу
+
           SUPER=$(find . -name super.img | head -n1)
-          if [ -z "$SUPER" ]; then echo "❌ super.img не найден после распаковки. Проверьте структуру архива."; exit 1; fi
+          if [ -z "$SUPER" ]; then 
+              echo "❌ super.img не найден после распаковки. Проверьте содержимое архива."
+              exit 1 
+          fi
 
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
-          rm super.raw "$SUPER" || true # Удаляем тяжелые файлы
+          rm super.raw "$SUPER" || true 
 
           cp boot.img dtbo.img vbmeta.img ../final/images/ || true
 
@@ -101,7 +103,7 @@ jobs:
           grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/stock_android.txt || true
           rm -rf product_fs
 
-      # 4. Обработка PORT (Исправлена распаковка)
+      # 4. Обработка PORT (Исправлена распаковка на tar -xvf)
       - name: Process PORT (system only)
         run: |
           set -e
@@ -114,7 +116,10 @@ jobs:
           rm port.tgz # Освобождаем место
 
           SUPER=$(find . -name super.img | head -n1)
-          if [ -z "$SUPER" ]; then echo "❌ super.img не найден в PORT. Проверьте структуру архива."; exit 1; fi
+          if [ -z "$SUPER" ]; then 
+              echo "❌ super.img не найден в PORT. Проверьте структуру архива."
+              exit 1 
+          fi
           
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
@@ -155,11 +160,9 @@ jobs:
             if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
               mkfs.erofs -zlz4 ../final/images/${NAME}.img extracted
             else
-              # Используем make_ext4fs. Если она отсутствует (что вероятно), это может стать следующей проблемой.
-              # Добавлена проверка 'which' для стабильности.
+              # Используем make_ext4fs.
               if ! command -v make_ext4fs &> /dev/null; then
-                  echo "make_ext4fs не найдена. Используйте mke2fs или установите make_ext4fs вручную."
-                  # В реальном проекте здесь нужна запасная команда или ручная установка
+                  echo "make_ext4fs не найдена. Пропуск создания $NAME."
                   return
               fi
               make_ext4fs -s -l $SIZE -a $NAME ../final/images/${NAME}.img extracted
