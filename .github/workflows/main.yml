@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Permission Fix)
+name: Port ROM for Poco F3 (Clean Build)
 
 on:
   workflow_dispatch:
@@ -41,12 +41,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file unzip
           
-          # 1. lpunpack (LineageOS)
+          # 1. lpunpack
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # 2. EROFS Utils (Source)
+          # 2. EROFS Utils
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -164,12 +164,11 @@ jobs:
                 echo "persist.sys.usb.config=adb" >> "$PROP"
              fi
              
-             echo ">>> Fixing Permissions inside Product..."
+             echo ">>> Fixing Permissions..."
              sudo chown -R 0:0 port_extracted
              sudo chmod -R 755 port_extracted
              
              echo ">>> Repacking Product..."
-             # Создаем файл с правами root
              sudo mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
              sudo rm -rf port_extracted assets_to_patch
           else
@@ -177,34 +176,54 @@ jobs:
              exit 1
           fi
 
-      # 5. ПАТЧИНГ BOOT.IMG
+      # 5. ПАТЧИНГ BOOT.IMG (В ОТДЕЛЬНОЙ ПАПКЕ!)
       - name: Patch Boot for Logging
         run: |
-          cd workspace/final_rom/images
+          cd workspace
           
-          if [ -f boot.img ]; then
+          # Создаем изолированную папку, чтобы не засорять final_rom
+          mkdir boot_patch
+          
+          if [ -f final_rom/images/boot.img ]; then
+             echo ">>> Moving boot to isolation..."
+             mv final_rom/images/boot.img boot_patch/
+             cd boot_patch
+             
              echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
              
+             # SELinux
              if [ -f header ]; then
                 if ! grep -q "androidboot.selinux=permissive" header; then
                     sed -i 's/$/ androidboot.selinux=permissive/' header
                 fi
              fi
              
+             # ADB
              if [ -f ramdisk.cpio ]; then
+                # Осторожно распаковываем ТОЛЬКО проп, если можно, или распаковываем всё, но потом чистим
                 magiskboot cpio ramdisk.cpio extract
+                
                 if [ ! -f default.prop ]; then touch default.prop; fi
                 sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
                 sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
                 sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
                 echo "persist.sys.usb.config=adb" >> default.prop
+                
                 magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
              fi
              
              magiskboot repack boot.img
-             mv new-boot.img boot.img
-             rm -f header kernel ramdisk.cpio dtb default.prop
+             
+             # Возвращаем готовый файл обратно
+             mv new-boot.img ../final_rom/images/boot.img
+             
+             echo ">>> Boot patched and returned!"
+             cd ..
+             # УДАЛЯЕМ ПАПКУ СО ВСЕМ МУСОРОМ (odm, etc, ramdisk)
+             rm -rf boot_patch
+          else
+             echo "ERROR: boot.img not found!"
           fi
 
       - name: Pack Final ZIP (SPLIT)
@@ -229,13 +248,12 @@ jobs:
           
           ZIP_NAME="${{ inputs.rom_name }}.zip"
           
-          # --- ФИКС ПРАВ ДОСТУПА ПЕРЕД УПАКОВКОЙ ---
-          echo ">>> Fixing ownership for 7-zip..."
-          # Возвращаем все файлы пользователю runner ($USER)
-          sudo chown -R $USER:$USER .
+          # Fix permissions for everything (sudo 7z is safest)
+          echo ">>> Zipping with sudo..."
+          sudo 7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
           
-          echo ">>> Zipping..."
-          7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
+          # Возвращаем права на zip пользователю, чтобы Action мог его загрузить
+          sudo chown $USER:$USER "$ZIP_NAME"*
           
           echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
@@ -246,7 +264,7 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
-            **DEBUG VERSION**
+            **DEBUG VERSION (Clean Build)**
             Base: ${{ inputs.port_url }}
             Instructions: Download all parts, extract .001, flash.
           files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
