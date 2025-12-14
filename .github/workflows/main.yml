@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Repack All for Compatibility)
+name: Port ROM for Poco F3 (Debloated)
 
 on:
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # EROFS Utils (Source)
+          # EROFS Utils
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -70,7 +70,7 @@ jobs:
           mkdir -p workspace/assets_to_patch
           mkdir -p workspace/temp
 
-      # 3. СТОК: Забираем Boot/Vendor + Конфиги
+      # 3. СТОК
       - name: Harvest Stock Files
         run: |
           cd workspace
@@ -81,12 +81,10 @@ jobs:
           7z x stock.tgz -o./temp -y
           if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          # Забираем файлы ядра и вендора
           find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
           
-          # Достаем Vendor и Product
           SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
@@ -98,7 +96,6 @@ jobs:
              find temp -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
           fi
           
-          # Извлекаем конфиги из стокового Product
           if [ -s product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=stock_extracted product.img; else 7z x product.img -ostock_extracted; fi
@@ -109,7 +106,7 @@ jobs:
           
           rm -rf stock.tgz temp super.raw product.img stock_extracted
 
-      # 4. ПОРТ: Полная пересборка (Repack All)
+      # 4. ПОРТ + DEBLOAT
       - name: Process Port & Repack
         run: |
           cd workspace
@@ -120,7 +117,6 @@ jobs:
           7z x port.tgz -o./temp -y
           if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          # Создаем папку для работы
           mkdir port_images
           
           SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
@@ -134,23 +130,19 @@ jobs:
           
           rm -rf port.tgz temp
           
-          # ФУНКЦИЯ ПЕРЕПАКОВКИ
-          # Мы должны распаковать образ и запаковать его с простым LZ4 сжатием
           repack_image() {
              NAME=$1
-             # Находим файл (берем самый большой, чтобы не взять пустышку _b)
              IMG=$(find port_images -name "${NAME}*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}')
              
              if [ -s "$IMG" ]; then
                 echo ">>> Processing $NAME..."
-                # Распаковка
                 TYPE=$(file -b "$IMG")
                 if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=extracted_${NAME} "$IMG"; else 7z x "$IMG" -oextracted_${NAME}; fi
-                rm "$IMG" # Удаляем оригинал для места
+                rm "$IMG"
                 
-                # --- ПАТЧИНГ PRODUCT ---
+                # --- МОДИФИКАЦИИ PRODUCT ---
                 if [ "$NAME" == "product" ]; then
-                   echo "   -> Patching Product specific files..."
+                   echo "   -> Applying Configs..."
                    if [ -f assets_to_patch/alioth.xml ]; then
                       TARGET_DIR="extracted_product/etc/device_features"
                       mkdir -p "$TARGET_DIR"
@@ -165,15 +157,41 @@ jobs:
                       echo "ro.product.product.device=alioth" >> "$PROP"
                       echo "ro.product.product.model=M2012K11AC" >> "$PROP"
                    fi
+
+                   # === DEBLOATING (УДАЛЕНИЕ ПРИЛОЖЕНИЙ) ===
+                   echo "   -> Removing Bloatware..."
+                   
+                   # 1. Приложения из списка пользователя
+                   sudo rm -rf extracted_product/app/AnalyticsCore
+                   sudo rm -rf extracted_product/app/Facebook*
+                   sudo rm -rf extracted_product/priv-app/Facebook*
+                   sudo rm -rf extracted_product/app/HybridPlatform
+                   sudo rm -rf extracted_product/app/MiBrowserGlobal
+                   sudo rm -rf extracted_product/app/MiCoin
+                   sudo rm -rf extracted_product/app/MiPicks
+                   sudo rm -rf extracted_product/priv-app/MiPicks
+                   sudo rm -rf extracted_product/app/MiVideoGlobal
+                   sudo rm -rf extracted_product/app/MSA
+                   sudo rm -rf extracted_product/app/YouTube
+                   
+                   # 2. Дополнительная очистка (Рекомендации)
+                   # Рекламные предустановки (TikTok, WPS и т.д.)
+                   sudo rm -rf extracted_product/data-app/*
+                   # Бесполезные сервисы
+                   sudo rm -rf extracted_product/app/MiuiDaemon
+                   sudo rm -rf extracted_product/app/SoterService
+                   sudo rm -rf extracted_product/app/CatchLog
+                   sudo rm -rf extracted_product/app/YellowPage
+                   # Нерабочий апдейтер
+                   sudo rm -rf extracted_product/priv-app/Updater
+                   # ========================================
                 fi
-                # -----------------------
 
                 echo "   -> Fixing Permissions..."
                 sudo chown -R 0:0 extracted_${NAME}
                 sudo chmod -R 755 extracted_${NAME}
                 
-                echo "   -> Repacking $NAME to Compatible EROFS (LZ4)..."
-                # Используем -zlz4 (без hc) и -C16384 (стандарт) для максимальной совместимости
+                echo "   -> Repacking $NAME to LZ4..."
                 sudo mkfs.erofs -zlz4 -C16384 -T 1230768000 --mount-point /${NAME} final_rom/images/${NAME}.img extracted_${NAME}
                 
                 sudo rm -rf extracted_${NAME}
@@ -182,7 +200,6 @@ jobs:
              fi
           }
           
-          # Запускаем перепаковку для всех системных разделов
           repack_image "system"
           repack_image "system_ext"
           repack_image "product"
@@ -245,9 +262,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
-            **COMPATIBILITY MODE**
-            - All partitions repacked to LZ4 (Fixes mount errors)
-            - Boot patched to Permissive
+            **DEBLOATED VERSION**
+            - Removed: Analytics, MSA, MiBrowser, Facebook, etc.
+            - Repacked: LZ4 (Compatible with F3 Kernel)
+            - Boot: Permissive
             
             Instructions: Download all parts, extract .001, flash.
           files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
