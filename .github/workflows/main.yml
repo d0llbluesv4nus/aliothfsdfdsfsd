@@ -1,18 +1,17 @@
-name: Port ROM for Poco F3 (Auto-FS & ODM Fix)
+name: Poco F3 ROM Port (BOOT-SAFE v3)
 
 on:
   workflow_dispatch:
     inputs:
       stock_url:
-        description: 'STOCK Fastboot ROM URL (Poco F3)'
+        description: 'STOCK Fastboot ROM (alioth)'
         required: true
       port_url:
-        description: 'PORT Fastboot ROM URL (Donor)'
+        description: 'PORT Fastboot ROM (donor)'
         required: true
       rom_name:
         description: 'ZIP name'
-        required: false
-        default: 'Alioth_Hybrid_Port'
+        default: 'Alioth_Port_SAFE'
 
 permissions:
   contents: write
@@ -27,7 +26,6 @@ jobs:
       - uses: jlumbroso/free-disk-space@main
         with:
           android: true
-          tool-cache: true
           docker-images: true
 
       # ================= TOOLS =================
@@ -39,47 +37,41 @@ jobs:
             android-sdk-libsparse-utils build-essential \
             liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
 
-          # lpunpack
           aria2c -o lpunpack https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
-          chmod +x lpunpack
-          sudo mv lpunpack /usr/local/bin/
+          chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # erofs-utils
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
-          ./autogen.sh
-          ./configure
-          make
+          ./autogen.sh && ./configure && make
           sudo make install
-          cd ..
-          rm -rf erofs-utils
+          cd .. && rm -rf erofs-utils
 
-          # magiskboot (Magisk 27+)
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
-          chmod +x magiskboot
-          sudo mv magiskboot /usr/local/bin/
+          chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
       # ================= PREP =================
       - name: Prepare workspace
         run: |
           set -e
-          mkdir -p workspace/{stock,port,final/images,assets}
+          mkdir -p workspace/{stock,port,final/images,assets,checks}
 
       # ================= STOCK =================
-      - name: Process STOCK
+      - name: Process STOCK (kernel + fstab source)
         run: |
           set -e
           cd workspace/stock
-
           aria2c "${{ inputs.stock_url }}" -o stock.tgz
           7z x stock.tgz -y
 
           SUPER=$(find . -name super.img | head -n1)
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
+
+          # Kernel & DT*
+          cp boot.img dtbo.img vbmeta.img ../final/images/
 
           PRODUCT=$(ls product*.img | sort -n | tail -1)
           if file "$PRODUCT" | grep -q EROFS; then
@@ -90,17 +82,15 @@ jobs:
             7z x "$PRODUCT" -oproduct_fs
           fi
 
-          XML=$(find product_fs -name alioth.xml | head -n1 || true)
-          [ -f "$XML" ] && cp "$XML" ../assets/
-
-          cp boot.img dtbo.img vbmeta.img ../final/images/ || true
+          # fstab + android version
+          find product_fs vendor_fs -name "fstab.*" -exec cp {} ../assets/ \; || true
+          grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/stock_android.txt || true
 
       # ================= PORT =================
-      - name: Process PORT
+      - name: Process PORT (system only)
         run: |
           set -e
           cd workspace/port
-
           aria2c "${{ inputs.port_url }}" -o port.tgz
           7z x port.tgz -y
 
@@ -108,27 +98,37 @@ jobs:
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
 
+          # Android version check
+          PRODUCT=$(ls product*.img | sort -n | tail -1)
+          if file "$PRODUCT" | grep -q EROFS; then
+            dump.erofs -x product_fs "$PRODUCT"
+          else
+            7z x "$PRODUCT" -oproduct_fs
+          fi
+          grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/port_android.txt || true
+
+          diff ../checks/stock_android.txt ../checks/port_android.txt || {
+            echo "❌ Android version mismatch – abort"
+            exit 1
+          }
+
           repack() {
             NAME=$1
             IMG=$(ls ${NAME}*.img 2>/dev/null | sort -n | tail -1 || true)
             [ -z "$IMG" ] && return
 
-            rm -rf extracted
-            mkdir extracted
-
+            rm -rf extracted && mkdir extracted
             if file "$IMG" | grep -q EROFS; then
               dump.erofs -x extracted "$IMG"
             else
               7z x "$IMG" -oextracted
             fi
 
-            if [ "$NAME" = "product" ] && [ -f ../assets/alioth.xml ]; then
-              mkdir -p extracted/etc/device_features
-              cp ../assets/alioth.xml extracted/etc/device_features/
-            fi
+            # fstab fix
+            find extracted -name "fstab.*" -delete
+            cp ../assets/fstab.* extracted/ 2>/dev/null || true
 
             SIZE=$(du -sm extracted | awk '{print $1+300}')M
-
             if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
               mkfs.erofs -zlz4 ../final/images/${NAME}.img extracted
             else
@@ -143,19 +143,14 @@ jobs:
           done
 
       # ================= BOOT =================
-      - name: Patch boot (SELinux permissive)
+      - name: Patch boot (alioth-safe)
         run: |
           set -e
           cd workspace/final/images
-
           magiskboot unpack boot.img
-
-          if [ -f kernel ]; then
-            magiskboot hexpatch kernel \
-              73656C696E75783D656E666F7263696E67 \
-              73656C696E75783D7065726D697373697665
-          fi
-
+          [ -f kernel ] && magiskboot hexpatch kernel \
+            73656C696E75783D656E666F7263696E67 \
+            73656C696E75783D7065726D697373697665
           magiskboot repack boot.img
           mv new-boot.img boot.img
 
@@ -164,7 +159,6 @@ jobs:
         run: |
           set -e
           cd workspace/final
-
           cat <<EOF > flash.bat
           fastboot flash boot images/boot.img
           fastboot flash dtbo images/dtbo.img
@@ -179,12 +173,10 @@ jobs:
 
           ZIP="${{ inputs.rom_name }}.zip"
           7z a -tzip -mx1 "$ZIP" .
-
           echo "TAG=v$(date +'%Y.%m.%d-%H%M')-${GITHUB_RUN_ID}" >> $GITHUB_ENV
 
-      # ================= RELEASE =================
       - uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG }}
-          name: Alioth Port ${{ env.TAG }}
+          name: Alioth Port SAFE ${{ env.TAG }}
           files: workspace/final/${{ inputs.rom_name }}.zip
