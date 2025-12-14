@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Zero Byte Fix)
+name: Port ROM for Poco F3 (Debug & Permissive)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,6 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # 1. Очистка
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -37,13 +36,12 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Инструменты
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
           
-          # lpunpack
+          # lpunpack (LineageOS)
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
@@ -57,6 +55,12 @@ jobs:
           sudo make install
           cd ..
           rm -rf erofs-utils
+          
+          # MAGISKBOOT (Для патчинга boot.img)
+          echo ">>> Downloading Magiskboot..."
+          wget https://github.com/ssut/magiskboot_build/releases/download/v23.0/magiskboot-linux-x86_64 -O magiskboot
+          chmod +x magiskboot
+          sudo mv magiskboot /usr/local/bin/
 
       - name: Prepare Dirs
         run: |
@@ -64,7 +68,7 @@ jobs:
           mkdir -p workspace/assets_to_patch
           mkdir -p workspace/temp
 
-      # 3. СТОК (ИСПРАВЛЕНО: БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ)
+      # 3. СТОК
       - name: Harvest Stock Files
         run: |
           cd workspace
@@ -80,39 +84,30 @@ jobs:
           find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
           
-          # Работа с Super.img
           SUPER_IMG=$(find temp -type f -name "super.img" | head -n 1)
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw .
-             
-             # ИЩЕМ САМЫЕ БОЛЬШИЕ ФАЙЛЫ (Чтобы не взять 0 байт)
              find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} product.img
              find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/vendor.img
           else
-             # Если не super.img, тоже проверяем размер на всякий случай
              find temp -name "product.img" -exec mv {} product.img \;
              find temp -name "vendor.img" -exec mv {} final_rom/images/vendor.img \;
           fi
           
-          # Извлекаем конфиги
           if [ -s product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=stock_extracted product.img; else 7z x product.img -ostock_extracted; fi
              
              XML=$(find stock_extracted -name "alioth.xml" | head -n 1)
              if [ -f "$XML" ]; then cp "$XML" assets_to_patch/; fi
-             
-             OVL=$(find stock_extracted -name "AospFrameworkResOverlay.apk" | head -n 1)
-             if [ -f "$OVL" ]; then cp "$OVL" assets_to_patch/; fi
           else
-             echo "WARNING: Stock Product is empty or missing!"
+             echo "WARNING: Stock Product is empty!"
           fi
           
-          echo ">>> DELETING STOCK..."
           rm -rf stock.tgz temp super.raw product.img stock_extracted
 
-      # 4. ПОРТ (ИСПРАВЛЕНО: БЕРЕМ САМЫЙ БОЛЬШОЙ ФАЙЛ)
+      # 4. ПОРТ
       - name: Process Port & Patch
         run: |
           cd workspace
@@ -127,13 +122,10 @@ jobs:
           if [ -f "$SUPER_IMG" ]; then
              simg2img "$SUPER_IMG" super.raw
              lpunpack super.raw .
-             
-             # ВАЖНО: Сортировка по размеру (sort -n), берем последний (tail -1) - это самый большой файл
              find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/system.img
              find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/system_ext.img
              find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} final_rom/images/mi_ext.img || true
              find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} product.img
-             
              rm super.raw
           else
              find temp -name "system.img" -exec mv {} final_rom/images/ \;
@@ -144,7 +136,7 @@ jobs:
           
           rm -rf port.tgz temp
           
-          # Патчинг Product
+          # ПАТЧИНГ PRODUCT
           if [ -s product.img ]; then
              TYPE=$(file -b product.img)
              if [[ "$TYPE" == *"EROFS"* ]]; then fsck.erofs --extract=port_extracted product.img; else 7z x product.img -oport_extracted; fi
@@ -157,24 +149,78 @@ jobs:
                 find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
              fi
              
-             if [ -f assets_to_patch/AospFrameworkResOverlay.apk ]; then
-                cp assets_to_patch/AospFrameworkResOverlay.apk port_extracted/overlay/ || true
-             fi
-             
              PROP=$(find port_extracted -name "build.prop" | head -n 1)
              if [ -f "$PROP" ]; then
                 echo >> "$PROP"
                 echo "ro.product.product.name=alioth" >> "$PROP"
                 echo "ro.product.product.device=alioth" >> "$PROP"
                 echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+                # Добавляем флаги отладки и сюда тоже
+                echo "ro.debuggable=1" >> "$PROP"
+                echo "ro.secure=0" >> "$PROP"
+                echo "ro.adb.secure=0" >> "$PROP"
+                echo "persist.sys.usb.config=adb" >> "$PROP"
              fi
              
-             echo ">>> Repacking..."
-             mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
-             rm -rf port_extracted assets_to_patch
+             echo ">>> Fixing Permissions..."
+             sudo chown -R 0:0 port_extracted
+             sudo chmod -R 755 port_extracted
+             
+             echo ">>> Repacking Product..."
+             sudo mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
+             sudo rm -rf port_extracted assets_to_patch
           else
              echo "CRITICAL ERROR: Port Product image is empty!"
              exit 1
+          fi
+
+      # 5. ПАТЧИНГ BOOT.IMG (ГЛАВНОЕ ДЛЯ ЛОГОВ)
+      - name: Patch Boot for Logging
+        run: |
+          cd workspace/final_rom/images
+          
+          if [ -f boot.img ]; then
+             echo ">>> Patching boot.img for debugging..."
+             
+             # 1. Распаковка boot.img
+             magiskboot unpack boot.img
+             
+             # 2. Патчинг командной строки (cmdline) - включаем SELinux Permissive
+             # Это самое важное для запуска портов!
+             if [ -f header ]; then
+                echo "Patching header (cmdline)..."
+                sed -i 's/$/ androidboot.selinux=permissive/' header
+             fi
+             
+             # 3. Патчинг ramdisk (включение ADB)
+             if [ -f ramdisk.cpio ]; then
+                echo "Patching ramdisk properties..."
+                magiskboot cpio ramdisk.cpio extract
+                
+                # Создаем или редактируем default.prop
+                if [ ! -f default.prop ]; then touch default.prop; fi
+                
+                # Заменяем значения на "небезопасные" для отладки
+                sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
+                sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
+                sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
+                # Принудительно включаем USB ADB
+                echo "persist.sys.usb.config=adb" >> default.prop
+                
+                # Запаковываем проп обратно в cpio
+                magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
+             fi
+             
+             # 4. Сборка обратно
+             echo "Repacking boot.img..."
+             magiskboot repack boot.img
+             mv new-boot.img boot.img
+             
+             # Чистим мусор
+             rm -f header kernel ramdisk.cpio dtb
+             echo ">>> Boot image patched successfully!"
+          else
+             echo "ERROR: boot.img not found for patching!"
           fi
 
       - name: Pack Final ZIP (SPLIT)
@@ -209,11 +255,14 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
-            Automatic Port for Poco F3
-            Base: ${{ inputs.port_url }}
+            **DEBUG VERSION**
+            - SELinux: Permissive (Bootloop Fix)
+            - ADB: Enabled by default (No Auth)
+            - Secure: Off
             
             **INSTRUCTIONS:**
             1. Download ALL parts (.001, .002...).
-            2. Open the first file (.001) with 7-Zip/WinRAR.
-            3. Extract.
+            2. Open the first file (.001).
+            3. Extract & Flash.
+            4. If it hangs on logo: `adb logcat > log.txt`
           files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
