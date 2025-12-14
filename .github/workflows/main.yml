@@ -30,6 +30,7 @@ jobs:
           tool-cache: true
           docker-images: true
 
+      # ================= TOOLS =================
       - name: Install tools
         run: |
           set -e
@@ -52,24 +53,28 @@ jobs:
           cd ..
           rm -rf erofs-utils
 
-          # magiskboot (CORRECT)
+          # magiskboot (Magisk 27+ FIXED)
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk -d magisk
-          cp magisk/assets/magiskboot .
+          cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
+          magiskboot --help || magiskboot
+
+      # ================= PREP =================
       - name: Prepare workspace
         run: |
           set -e
           mkdir -p workspace/{stock,port,final/images,assets}
 
-      # ---------- STOCK ----------
+      # ================= STOCK =================
       - name: Process STOCK
         run: |
           set -e
           cd workspace/stock
+
           aria2c "${{ inputs.stock_url }}" -o stock.tgz
           7z x stock.tgz -y
 
@@ -78,9 +83,7 @@ jobs:
           lpunpack super.raw .
 
           PRODUCT=$(ls product*.img | sort -n | tail -1)
-          FILETYPE=$(file "$PRODUCT")
-
-          if echo "$FILETYPE" | grep -q EROFS; then
+          if file "$PRODUCT" | grep -q EROFS; then
             echo "STOCK_FS=erofs" >> $GITHUB_ENV
             dump.erofs -x product_fs "$PRODUCT"
           else
@@ -88,16 +91,17 @@ jobs:
             7z x "$PRODUCT" -oproduct_fs
           fi
 
-          XML=$(find product_fs -name alioth.xml | head -n1)
+          XML=$(find product_fs -name alioth.xml | head -n1 || true)
           [ -f "$XML" ] && cp "$XML" ../assets/
 
           cp boot.img dtbo.img vbmeta.img ../final/images/ || true
 
-      # ---------- PORT ----------
+      # ================= PORT =================
       - name: Process PORT
         run: |
           set -e
           cd workspace/port
+
           aria2c "${{ inputs.port_url }}" -o port.tgz
           7z x port.tgz -y
 
@@ -105,12 +109,13 @@ jobs:
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
 
-          mkdir extracted
-          
           repack() {
             NAME=$1
             IMG=$(ls ${NAME}*.img 2>/dev/null | sort -n | tail -1 || true)
             [ -z "$IMG" ] && return
+
+            rm -rf extracted
+            mkdir extracted
 
             if file "$IMG" | grep -q EROFS; then
               dump.erofs -x extracted "$IMG"
@@ -138,23 +143,29 @@ jobs:
             repack $p
           done
 
-      # ---------- BOOT PATCH ----------
-      - name: Patch boot (permissive)
+      # ================= BOOT =================
+      - name: Patch boot (SELinux permissive)
         run: |
           set -e
           cd workspace/final/images
+
           magiskboot unpack boot.img
-          magiskboot hexpatch kernel \
-            73656C696E75783D656E666F7263696E67 \
-            73656C696E75783D7065726D697373697665
+
+          if [ -f kernel ]; then
+            magiskboot hexpatch kernel \
+              73656C696E75783D656E666F7263696E67 \
+              73656C696E75783D7065726D697373697665
+          fi
+
           magiskboot repack boot.img
           mv new-boot.img boot.img
 
-      # ---------- ZIP ----------
+      # ================= ZIP =================
       - name: Pack ZIP
         run: |
           set -e
           cd workspace/final
+
           cat <<EOF > flash.bat
           fastboot flash boot images/boot.img
           fastboot flash dtbo images/dtbo.img
@@ -164,6 +175,7 @@ jobs:
           fastboot flash system_ext images/system_ext.img
           fastboot flash product images/product.img
           fastboot reboot
+          pause
           EOF
 
           ZIP="${{ inputs.rom_name }}.zip"
@@ -171,6 +183,7 @@ jobs:
 
           echo "TAG=v$(date +'%Y.%m.%d-%H%M')-${GITHUB_RUN_ID}" >> $GITHUB_ENV
 
+      # ================= RELEASE =================
       - uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.TAG }}
