@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Debug & Permissive)
+name: Port ROM for Poco F3 (Working Magiskboot)
 
 on:
   workflow_dispatch:
@@ -41,12 +41,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
           
-          # lpunpack (LineageOS)
+          # 1. lpunpack (LineageOS)
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # EROFS Utils
+          # 2. EROFS Utils (Source)
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -56,11 +56,25 @@ jobs:
           cd ..
           rm -rf erofs-utils
           
-          # MAGISKBOOT (Для патчинга boot.img)
+          # 3. MAGISKBOOT (ИСПРАВЛЕНО: источник osm0sis)
           echo ">>> Downloading Magiskboot..."
-          wget https://github.com/ssut/magiskboot_build/releases/download/v23.0/magiskboot-linux-x86_64 -O magiskboot
+          # Ссылка на репозиторий osm0sis (самый надежный источник)
+          wget https://raw.githubusercontent.com/osm0sis/Android-Image-Kitchen/master/AIK-Linux/bin/magiskboot -O magiskboot
+          
+          # Проверка на ошибку 404
+          if grep -q "404: Not Found" magiskboot; then
+             echo "ERROR: osm0sis link failed. Trying backup..."
+             rm magiskboot
+             # Запасной вариант (xiaoxindada релиз)
+             wget https://github.com/xiaoxindada/magiskboot_build/releases/download/Magisk-v26.4/magiskboot-linux-x86_64 -O magiskboot
+          fi
+          
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
+          
+          # Финальная проверка
+          if ! command -v magiskboot >/dev/null; then echo "CRITICAL: magiskboot failed"; exit 1; fi
+          echo "SUCCESS: Tools ready."
 
       - name: Prepare Dirs
         run: |
@@ -79,7 +93,6 @@ jobs:
           7z x stock.tgz -o./temp -y
           if ls temp/*.tar 1> /dev/null 2>&1; then 7z x temp/*.tar -o./temp -y; fi
           
-          # Обычные файлы
           find temp -type f -name "boot.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "dtbo.img" -exec mv {} final_rom/images/ \;
           find temp -type f -name "vbmeta.img" -exec mv {} final_rom/images/ \;
@@ -155,7 +168,7 @@ jobs:
                 echo "ro.product.product.name=alioth" >> "$PROP"
                 echo "ro.product.product.device=alioth" >> "$PROP"
                 echo "ro.product.product.model=M2012K11AC" >> "$PROP"
-                # Добавляем флаги отладки и сюда тоже
+                # Отладка
                 echo "ro.debuggable=1" >> "$PROP"
                 echo "ro.secure=0" >> "$PROP"
                 echo "ro.adb.secure=0" >> "$PROP"
@@ -174,53 +187,34 @@ jobs:
              exit 1
           fi
 
-      # 5. ПАТЧИНГ BOOT.IMG (ГЛАВНОЕ ДЛЯ ЛОГОВ)
+      # 5. ПАТЧИНГ BOOT.IMG
       - name: Patch Boot for Logging
         run: |
           cd workspace/final_rom/images
           
           if [ -f boot.img ]; then
-             echo ">>> Patching boot.img for debugging..."
-             
-             # 1. Распаковка boot.img
+             echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
              
-             # 2. Патчинг командной строки (cmdline) - включаем SELinux Permissive
-             # Это самое важное для запуска портов!
              if [ -f header ]; then
-                echo "Patching header (cmdline)..."
                 sed -i 's/$/ androidboot.selinux=permissive/' header
              fi
              
-             # 3. Патчинг ramdisk (включение ADB)
              if [ -f ramdisk.cpio ]; then
-                echo "Patching ramdisk properties..."
                 magiskboot cpio ramdisk.cpio extract
-                
-                # Создаем или редактируем default.prop
                 if [ ! -f default.prop ]; then touch default.prop; fi
-                
-                # Заменяем значения на "небезопасные" для отладки
                 sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
                 sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
                 sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
-                # Принудительно включаем USB ADB
                 echo "persist.sys.usb.config=adb" >> default.prop
-                
-                # Запаковываем проп обратно в cpio
                 magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
              fi
              
-             # 4. Сборка обратно
-             echo "Repacking boot.img..."
              magiskboot repack boot.img
              mv new-boot.img boot.img
-             
-             # Чистим мусор
              rm -f header kernel ramdisk.cpio dtb
-             echo ">>> Boot image patched successfully!"
           else
-             echo "ERROR: boot.img not found for patching!"
+             echo "ERROR: boot.img not found!"
           fi
 
       - name: Pack Final ZIP (SPLIT)
@@ -256,13 +250,6 @@ jobs:
           name: Alioth Port ${{ env.RELEASE_TAG }}
           body: |
             **DEBUG VERSION**
-            - SELinux: Permissive (Bootloop Fix)
-            - ADB: Enabled by default (No Auth)
-            - Secure: Off
-            
-            **INSTRUCTIONS:**
-            1. Download ALL parts (.001, .002...).
-            2. Open the first file (.001).
-            3. Extract & Flash.
-            4. If it hangs on logo: `adb logcat > log.txt`
+            Base: ${{ inputs.port_url }}
+            Instructions: Download all parts, extract .001, flash.
           files: workspace/final_rom/${{ inputs.rom_name }}.zip.*
