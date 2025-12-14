@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Working Magiskboot)
+name: Port ROM for Poco F3 (Official APK Method)
 
 on:
   workflow_dispatch:
@@ -39,14 +39,14 @@ jobs:
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file
+          sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file unzip
           
-          # 1. lpunpack (LineageOS)
+          # 1. lpunpack (LineageOS - Стабильно)
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # 2. EROFS Utils (Source)
+          # 2. EROFS Utils (Сборка - Стабильно)
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -56,25 +56,28 @@ jobs:
           cd ..
           rm -rf erofs-utils
           
-          # 3. MAGISKBOOT (ИСПРАВЛЕНО: источник osm0sis)
-          echo ">>> Downloading Magiskboot..."
-          # Ссылка на репозиторий osm0sis (самый надежный источник)
-          wget https://raw.githubusercontent.com/osm0sis/Android-Image-Kitchen/master/AIK-Linux/bin/magiskboot -O magiskboot
+          # 3. MAGISKBOOT (НОВЫЙ МЕТОД: Из официального APK)
+          echo ">>> Downloading Official Magisk APK..."
+          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O Magisk.apk
           
-          # Проверка на ошибку 404
-          if grep -q "404: Not Found" magiskboot; then
-             echo "ERROR: osm0sis link failed. Trying backup..."
-             rm magiskboot
-             # Запасной вариант (xiaoxindada релиз)
-             wget https://github.com/xiaoxindada/magiskboot_build/releases/download/Magisk-v26.4/magiskboot-linux-x86_64 -O magiskboot
-          fi
+          echo ">>> Extracting magiskboot from APK..."
+          # Magisk.apk это просто zip архив. Распаковываем.
+          unzip Magisk.apk -d magisk_files
+          
+          # Внутри APK бинарник лежит по пути lib/x86_64/libmagiskboot.so
+          # Это и есть исполняемый файл, просто с расширением .so
+          cp magisk_files/lib/x86_64/libmagiskboot.so magiskboot
           
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
           
+          # Чистим
+          rm -rf Magisk.apk magisk_files
+          
           # Финальная проверка
+          echo ">>> Verifying tools..."
           if ! command -v magiskboot >/dev/null; then echo "CRITICAL: magiskboot failed"; exit 1; fi
-          echo "SUCCESS: Tools ready."
+          echo "SUCCESS: All tools installed!"
 
       - name: Prepare Dirs
         run: |
@@ -196,23 +199,32 @@ jobs:
              echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
              
+             # Патчим cmdline (SELinux Permissive)
              if [ -f header ]; then
-                sed -i 's/$/ androidboot.selinux=permissive/' header
+                # Проверяем, нет ли уже там такого флага
+                if ! grep -q "androidboot.selinux=permissive" header; then
+                    sed -i 's/$/ androidboot.selinux=permissive/' header
+                fi
              fi
              
+             # Патчим ramdisk (ADB)
              if [ -f ramdisk.cpio ]; then
                 magiskboot cpio ramdisk.cpio extract
                 if [ ! -f default.prop ]; then touch default.prop; fi
+                
+                # Включаем ADB и Debug
                 sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
                 sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
                 sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
-                echo "persist.sys.usb.config=adb" >> default.prop
+                
+                # Упаковываем обратно
                 magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
              fi
              
              magiskboot repack boot.img
              mv new-boot.img boot.img
-             rm -f header kernel ramdisk.cpio dtb
+             rm -f header kernel ramdisk.cpio dtb default.prop
+             echo ">>> Boot patched!"
           else
              echo "ERROR: boot.img not found!"
           fi
