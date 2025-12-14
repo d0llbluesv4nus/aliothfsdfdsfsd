@@ -1,4 +1,4 @@
-name: Port ROM for Poco F3 (Official APK Method)
+name: Port ROM for Poco F3 (Permission Fix)
 
 on:
   workflow_dispatch:
@@ -41,12 +41,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y aria2 python3 git p7zip-full android-sdk-libsparse-utils build-essential zlib1g-dev liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev file unzip
           
-          # 1. lpunpack (LineageOS - Стабильно)
+          # 1. lpunpack (LineageOS)
           aria2c --allow-overwrite=true --check-certificate=false -o lpunpack "https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack"
           chmod +x lpunpack
           sudo mv lpunpack /usr/local/bin/
           
-          # 2. EROFS Utils (Сборка - Стабильно)
+          # 2. EROFS Utils (Source)
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh
@@ -56,28 +56,15 @@ jobs:
           cd ..
           rm -rf erofs-utils
           
-          # 3. MAGISKBOOT (НОВЫЙ МЕТОД: Из официального APK)
-          echo ">>> Downloading Official Magisk APK..."
+          # 3. MAGISKBOOT (APK Method)
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk -O Magisk.apk
-          
-          echo ">>> Extracting magiskboot from APK..."
-          # Magisk.apk это просто zip архив. Распаковываем.
           unzip Magisk.apk -d magisk_files
-          
-          # Внутри APK бинарник лежит по пути lib/x86_64/libmagiskboot.so
-          # Это и есть исполняемый файл, просто с расширением .so
           cp magisk_files/lib/x86_64/libmagiskboot.so magiskboot
-          
           chmod +x magiskboot
           sudo mv magiskboot /usr/local/bin/
-          
-          # Чистим
           rm -rf Magisk.apk magisk_files
           
-          # Финальная проверка
-          echo ">>> Verifying tools..."
           if ! command -v magiskboot >/dev/null; then echo "CRITICAL: magiskboot failed"; exit 1; fi
-          echo "SUCCESS: All tools installed!"
 
       - name: Prepare Dirs
         run: |
@@ -171,18 +158,18 @@ jobs:
                 echo "ro.product.product.name=alioth" >> "$PROP"
                 echo "ro.product.product.device=alioth" >> "$PROP"
                 echo "ro.product.product.model=M2012K11AC" >> "$PROP"
-                # Отладка
                 echo "ro.debuggable=1" >> "$PROP"
                 echo "ro.secure=0" >> "$PROP"
                 echo "ro.adb.secure=0" >> "$PROP"
                 echo "persist.sys.usb.config=adb" >> "$PROP"
              fi
              
-             echo ">>> Fixing Permissions..."
+             echo ">>> Fixing Permissions inside Product..."
              sudo chown -R 0:0 port_extracted
              sudo chmod -R 755 port_extracted
              
              echo ">>> Repacking Product..."
+             # Создаем файл с правами root
              sudo mkfs.erofs -zlz4hc,9 -T 1230768000 --mount-point /product final_rom/images/product.img port_extracted
              sudo rm -rf port_extracted assets_to_patch
           else
@@ -199,34 +186,25 @@ jobs:
              echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
              
-             # Патчим cmdline (SELinux Permissive)
              if [ -f header ]; then
-                # Проверяем, нет ли уже там такого флага
                 if ! grep -q "androidboot.selinux=permissive" header; then
                     sed -i 's/$/ androidboot.selinux=permissive/' header
                 fi
              fi
              
-             # Патчим ramdisk (ADB)
              if [ -f ramdisk.cpio ]; then
                 magiskboot cpio ramdisk.cpio extract
                 if [ ! -f default.prop ]; then touch default.prop; fi
-                
-                # Включаем ADB и Debug
                 sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
                 sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
                 sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
-                
-                # Упаковываем обратно
+                echo "persist.sys.usb.config=adb" >> default.prop
                 magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
              fi
              
              magiskboot repack boot.img
              mv new-boot.img boot.img
              rm -f header kernel ramdisk.cpio dtb default.prop
-             echo ">>> Boot patched!"
-          else
-             echo "ERROR: boot.img not found!"
           fi
 
       - name: Pack Final ZIP (SPLIT)
@@ -250,6 +228,13 @@ jobs:
           EOF
           
           ZIP_NAME="${{ inputs.rom_name }}.zip"
+          
+          # --- ФИКС ПРАВ ДОСТУПА ПЕРЕД УПАКОВКОЙ ---
+          echo ">>> Fixing ownership for 7-zip..."
+          # Возвращаем все файлы пользователю runner ($USER)
+          sudo chown -R $USER:$USER .
+          
+          echo ">>> Zipping..."
           7z a -tzip -mx1 -v2000m "$ZIP_NAME" .
           
           echo "RELEASE_TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
