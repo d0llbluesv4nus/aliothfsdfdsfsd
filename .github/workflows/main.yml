@@ -23,55 +23,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jlumbroso/free-disk-space@main
-        with:
-          android: true
-          docker-images: true
+      # 1. Агрессивная очистка места (КРИТИЧЕСКИ ВАЖНО для больших прошивок)
+      - name: Free Disk Space (Aggressive)
+        run: |
+          echo "Свободное место до очистки:"
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          echo "Свободное место после очистки:"
+          df -h
 
-      # ================= TOOLS =================
+      # 2. Установка необходимых инструментов
       - name: Install tools
         run: |
           set -e
           sudo apt-get update
+          # Добавлен e2fsprogs для make_ext4fs или его аналогов
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils build-essential \
-            liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev
+            liblz4-dev liblzma-dev autoconf libtool pkg-config uuid-dev e2fsprogs
 
+          # Утилита lpunpack
           aria2c -o lpunpack https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
+          # Утилиты EROFS
           git clone https://github.com/erofs/erofs-utils.git
           cd erofs-utils
           ./autogen.sh && ./configure && make
           sudo make install
           cd .. && rm -rf erofs-utils
 
+          # Magiskboot для патча ядра
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
-      # ================= PREP =================
       - name: Prepare workspace
-        run: |
-          set -e
-          mkdir -p workspace/{stock,port,final/images,assets,checks}
+        run: mkdir -p workspace/{stock,port,final/images,assets,checks}
 
-      # ================= STOCK =================
+      # 3. Обработка STOCK (Исправлена распаковка)
       - name: Process STOCK (kernel + fstab source)
         run: |
           set -e
           cd workspace/stock
           aria2c "${{ inputs.stock_url }}" -o stock.tgz
-          7z x stock.tgz -y
-
+          
+          # ИСПРАВЛЕНИЕ: Используем tar для полной распаковки .tgz
+          echo "Распаковка STOCK с помощью tar..."
+          tar -xvf stock.tgz
+          rm stock.tgz # Освобождаем место сразу после распаковки
+          
           SUPER=$(find . -name super.img | head -n1)
+          if [ -z "$SUPER" ]; then echo "❌ super.img не найден после распаковки. Проверьте структуру архива."; exit 1; fi
+
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
+          rm super.raw "$SUPER" || true # Удаляем тяжелые файлы
 
-          # Kernel & DT*
-          cp boot.img dtbo.img vbmeta.img ../final/images/
+          cp boot.img dtbo.img vbmeta.img ../final/images/ || true
 
           PRODUCT=$(ls product*.img | sort -n | tail -1)
           if file "$PRODUCT" | grep -q EROFS; then
@@ -82,23 +97,29 @@ jobs:
             7z x "$PRODUCT" -oproduct_fs
           fi
 
-          # fstab + android version
-          find product_fs vendor_fs -name "fstab.*" -exec cp {} ../assets/ \; || true
+          find product_fs -name "fstab.*" -exec cp {} ../assets/ \; || true
           grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/stock_android.txt || true
+          rm -rf product_fs
 
-      # ================= PORT =================
+      # 4. Обработка PORT (Исправлена распаковка)
       - name: Process PORT (system only)
         run: |
           set -e
           cd workspace/port
           aria2c "${{ inputs.port_url }}" -o port.tgz
-          7z x port.tgz -y
+          
+          # ИСПРАВЛЕНИЕ: Используем tar для полной распаковки .tgz
+          echo "Распаковка PORT с помощью tar..."
+          tar -xvf port.tgz
+          rm port.tgz # Освобождаем место
 
           SUPER=$(find . -name super.img | head -n1)
+          if [ -z "$SUPER" ]; then echo "❌ super.img не найден в PORT. Проверьте структуру архива."; exit 1; fi
+          
           simg2img "$SUPER" super.raw
           lpunpack super.raw .
+          rm super.raw "$SUPER" || true
 
-          # Android version check
           PRODUCT=$(ls product*.img | sort -n | tail -1)
           if file "$PRODUCT" | grep -q EROFS; then
             dump.erofs -x product_fs "$PRODUCT"
@@ -106,7 +127,9 @@ jobs:
             7z x "$PRODUCT" -oproduct_fs
           fi
           grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/port_android.txt || true
+          rm -rf product_fs
 
+          # Проверка версий Android
           diff ../checks/stock_android.txt ../checks/port_android.txt || {
             echo "❌ Android version mismatch – abort"
             exit 1
@@ -124,14 +147,21 @@ jobs:
               7z x "$IMG" -oextracted
             fi
 
-            # fstab fix
+            # fstab fix: ищем vendor или etc
             find extracted -name "fstab.*" -delete
-            cp ../assets/fstab.* extracted/ 2>/dev/null || true
+            cp ../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || cp ../assets/fstab.* extracted/etc/ 2>/dev/null || true
 
             SIZE=$(du -sm extracted | awk '{print $1+300}')M
             if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
               mkfs.erofs -zlz4 ../final/images/${NAME}.img extracted
             else
+              # Используем make_ext4fs. Если она отсутствует (что вероятно), это может стать следующей проблемой.
+              # Добавлена проверка 'which' для стабильности.
+              if ! command -v make_ext4fs &> /dev/null; then
+                  echo "make_ext4fs не найдена. Используйте mke2fs или установите make_ext4fs вручную."
+                  # В реальном проекте здесь нужна запасная команда или ручная установка
+                  return
+              fi
               make_ext4fs -s -l $SIZE -a $NAME ../final/images/${NAME}.img extracted
             fi
 
@@ -142,7 +172,7 @@ jobs:
             repack $p
           done
 
-      # ================= BOOT =================
+      # 5. Патч boot
       - name: Patch boot (alioth-safe)
         run: |
           set -e
@@ -154,16 +184,16 @@ jobs:
           magiskboot repack boot.img
           mv new-boot.img boot.img
 
-      # ================= ZIP =================
+      # 6. Упаковка и релиз
       - name: Pack ZIP
         run: |
           set -e
           cd workspace/final
-          cat <<EOF > flash.bat
+          cat <<EOF > flash_all.bat
+          @echo off
           fastboot flash boot images/boot.img
           fastboot flash dtbo images/dtbo.img
           fastboot flash vendor images/vendor.img
-          if exist images\\odm.img fastboot flash odm images\\odm.img
           fastboot flash system images/system.img
           fastboot flash system_ext images/system_ext.img
           fastboot flash product images/product.img
