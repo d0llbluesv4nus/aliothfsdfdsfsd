@@ -66,19 +66,28 @@ jobs:
       - name: Prepare workspace
         run: mkdir -p workspace/{stock,port,final/images,assets,checks}
 
-      # 3. Обработка STOCK (Исправлена распаковка на tar -xvf)
+      # 3. Обработка STOCK (Критическое исправление распаковки и пути)
       - name: Process STOCK (kernel + fstab source)
         run: |
           set -e
           cd workspace/stock
           aria2c "${{ inputs.stock_url }}" -o stock.tgz
           
-          # ИСПРАВЛЕНИЕ: Используем tar для полной распаковки .tgz
+          # 3.1. ИСПРАВЛЕНИЕ: Используем tar для полной распаковки .tgz
           echo "Распаковка STOCK с помощью tar..."
           tar -xvf stock.tgz
           rm stock.tgz # Освобождаем место сразу
 
-          SUPER=$(find . -name super.img | head -n1)
+          # 3.2. ИСПРАВЛЕНИЕ: Проверяем наличие вложенной папки (например, alioth_global_images_...)
+          # и переходим в нее, чтобы найти .img файлы.
+          IMG_SUBDIR=$(find . -maxdepth 1 -type d -name "*images*" | head -n1)
+          if [ ! -z "$IMG_SUBDIR" ] && [ "$IMG_SUBDIR" != "." ]; then
+            cd "$IMG_SUBDIR"
+            echo "Переход во вложенную папку: $IMG_SUBDIR"
+          fi
+
+          # 3.3. Теперь все файлы должны быть доступны в текущей директории
+          SUPER=$(find . -maxdepth 1 -name super.img | head -n1)
           if [ -z "$SUPER" ]; then 
               echo "❌ super.img не найден после распаковки. Проверьте структуру архива."
               exit 1 
@@ -88,7 +97,8 @@ jobs:
           lpunpack super.raw .
           rm super.raw "$SUPER" || true 
 
-          cp boot.img dtbo.img vbmeta.img ../final/images/ || true
+          # boot, dtbo, vbmeta должны быть скопированы из текущей папки, где лежат .img файлы
+          cp boot.img dtbo.img vbmeta.img ../../final/images/ || true
 
           PRODUCT=$(ls product*.img | sort -n | tail -1)
           if file "$PRODUCT" | grep -q EROFS; then
@@ -99,11 +109,12 @@ jobs:
             7z x "$PRODUCT" -oproduct_fs
           fi
 
-          find product_fs -name "fstab.*" -exec cp {} ../assets/ \; || true
-          grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/stock_android.txt || true
+          # Копирование fstab (путь к assets из вложенной папки)
+          find product_fs -name "fstab.*" -exec cp {} ../../assets/ \; || true
+          grep -R "ro.build.version.release" product_fs | head -n1 > ../../checks/stock_android.txt || true
           rm -rf product_fs
 
-      # 4. Обработка PORT (Исправлена распаковка на tar -xvf)
+      # 4. Обработка PORT (с аналогичным исправлением пути)
       - name: Process PORT (system only)
         run: |
           set -e
@@ -115,7 +126,14 @@ jobs:
           tar -xvf port.tgz
           rm port.tgz # Освобождаем место
 
-          SUPER=$(find . -name super.img | head -n1)
+          # ИСПРАВЛЕНИЕ: Проверяем наличие вложенной папки и переходим в нее
+          IMG_SUBDIR=$(find . -maxdepth 1 -type d -name "*images*" | head -n1)
+          if [ ! -z "$IMG_SUBDIR" ] && [ "$IMG_SUBDIR" != "." ]; then
+            cd "$IMG_SUBDIR"
+            echo "Переход во вложенную папку: $IMG_SUBDIR"
+          fi
+
+          SUPER=$(find . -maxdepth 1 -name super.img | head -n1)
           if [ -z "$SUPER" ]; then 
               echo "❌ super.img не найден в PORT. Проверьте структуру архива."
               exit 1 
@@ -131,17 +149,18 @@ jobs:
           else
             7z x "$PRODUCT" -oproduct_fs
           fi
-          grep -R "ro.build.version.release" product_fs | head -n1 > ../checks/port_android.txt || true
+          grep -R "ro.build.version.release" product_fs | head -n1 > ../../checks/port_android.txt || true
           rm -rf product_fs
 
           # Проверка версий Android
-          diff ../checks/stock_android.txt ../checks/port_android.txt || {
+          diff ../../checks/stock_android.txt ../../checks/port_android.txt || {
             echo "❌ Android version mismatch – abort"
             exit 1
           }
 
           repack() {
             NAME=$1
+            # Поиск в текущей папке (.img)
             IMG=$(ls ${NAME}*.img 2>/dev/null | sort -n | tail -1 || true)
             [ -z "$IMG" ] && return
 
@@ -152,20 +171,20 @@ jobs:
               7z x "$IMG" -oextracted
             fi
 
-            # fstab fix: ищем vendor или etc
+            # fstab fix: путь к assets изменился на ../../assets/
             find extracted -name "fstab.*" -delete
-            cp ../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || cp ../assets/fstab.* extracted/etc/ 2>/dev/null || true
+            cp ../../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || cp ../../assets/fstab.* extracted/etc/ 2>/dev/null || true
 
             SIZE=$(du -sm extracted | awk '{print $1+300}')M
             if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
-              mkfs.erofs -zlz4 ../final/images/${NAME}.img extracted
+              mkfs.erofs -zlz4 ../../final/images/${NAME}.img extracted
             else
               # Используем make_ext4fs.
               if ! command -v make_ext4fs &> /dev/null; then
                   echo "make_ext4fs не найдена. Пропуск создания $NAME."
                   return
               fi
-              make_ext4fs -s -l $SIZE -a $NAME ../final/images/${NAME}.img extracted
+              make_ext4fs -s -l $SIZE -a $NAME ../../final/images/${NAME}.img extracted
             fi
 
             rm -rf extracted "$IMG"
