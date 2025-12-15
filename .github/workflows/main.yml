@@ -1,4 +1,4 @@
-name: Poco F3 Port + OrangeFox
+name: Poco F3 Port (OFox Fail-Safe)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         required: true
       rom_name:
         description: 'ZIP name'
-        default: 'Alioth_Port_OFox'
+        default: 'Alioth_Port_Release'
 
 permissions:
   contents: write
@@ -47,7 +47,7 @@ jobs:
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # make_ext4fs
+          # make_ext4fs (TWRPDtGen Mirror)
           if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
              chmod +x make_ext4fs
              sudo mv make_ext4fs /usr/local/bin/
@@ -89,10 +89,8 @@ jobs:
              rm super.raw
           fi
 
-          # Сохраняем стоковый BOOT как резерв (на всякий случай)
-          cp boot.img "$FINAL/boot_stock_backup.img"
-          
-          # Копируем остальные файлы
+          # Бэкап стокового ядра (ВАЖНО для Fail-Safe)
+          cp boot.img "$FINAL/boot_stock.img"
           cp dtbo.img "$FINAL/"
           cp vbmeta.img "$FINAL/"
           
@@ -108,6 +106,11 @@ jobs:
           fi
 
           find product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
+          
+          echo ">>> Saving alioth.xml..."
+          XML=$(find product_fs -name "alioth.xml" | head -n 1)
+          if [ -f "$XML" ]; then cp "$XML" "$ASSETS/"; fi
+
           rm -rf product_fs
 
       # 4. Обработка PORT
@@ -161,23 +164,41 @@ jobs:
                fi
                
                if [ "$NAME" == "product" ]; then
-                   echo "   -> Debloating Product..."
+                   
+                   # Inject alioth.xml
+                   if [ -f "$ASSETS/alioth.xml" ]; then
+                      TARGET_DIR="extracted/etc/device_features"
+                      mkdir -p "$TARGET_DIR"
+                      cp "$ASSETS/alioth.xml" "$TARGET_DIR/"
+                      find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+                   fi
+
+                   # Patch build.prop
+                   PROP=$(find extracted -name "build.prop" | head -n 1)
+                   if [ -f "$PROP" ]; then
+                      echo >> "$PROP"
+                      echo "# Alioth Port Params" >> "$PROP"
+                      echo "ro.product.product.name=alioth" >> "$PROP"
+                      echo "ro.product.product.device=alioth" >> "$PROP"
+                      echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+                      echo "ro.product.board=alioth" >> "$PROP"
+                   fi
+
+                   # Debloating
+                   echo "   -> Debloating..."
                    sudo rm -rf extracted/data-app/*
                    sudo rm -rf extracted/app/AnalyticsCore
                    sudo rm -rf extracted/app/MSA
                    sudo rm -rf extracted/app/MiVideoGlobal
                    sudo rm -rf extracted/app/Facebook*
                    sudo rm -rf extracted/priv-app/Facebook*
-                   sudo rm -rf extracted/app/YouTube
                fi
 
                OUTPUT_IMG="$FINAL/${NAME}.img"
                
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
-                  echo "   -> Packing to EROFS (Compressed)..."
                   mkfs.erofs -zlz4hc -C16384 "$OUTPUT_IMG" extracted
                else
-                  echo "   -> Packing to EXT4 (Sparse)..."
                   SIZE_MB=$(du -sm extracted | awk '{print $1+100}')
                   if command -v make_ext4fs >/dev/null; then
                       make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
@@ -199,55 +220,55 @@ jobs:
           repack product
           repack mi_ext
 
-      # 5. Установка и Патчинг OrangeFox
+      # 5. Установка OrangeFox (FAIL-SAFE)
       - name: Inject OrangeFox Recovery
         run: |
           cd "$GITHUB_WORKSPACE/workspace/final/images"
           
-          echo ">>> Downloading OrangeFox Recovery (Stable R11.1_6 for Alioth)..."
-          # Прямая ссылка на SourceForge (зеркало)
-          wget -q "https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip" -O ofox.zip
+          echo ">>> Downloading OrangeFox..."
+          # Используем aria2c, так как он лучше обрабатывает редиректы
+          # Добавляем "|| true", чтобы ошибка скачивания НЕ ОСТАНАВЛИВАЛА скрипт
+          aria2c -o ofox.zip "https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip" || true
           
-          # Достаем recovery.img
-          unzip -q ofox.zip recovery.img
-          rm ofox.zip
+          if [ -f ofox.zip ]; then
+             unzip -q ofox.zip recovery.img
+             rm ofox.zip
+          fi
           
           if [ -f recovery.img ]; then
-             echo ">>> Replacing boot.img with OrangeFox..."
+             echo ">>> ✅ OrangeFox downloaded! Using as boot.img..."
              mv recovery.img boot.img
              
-             echo ">>> Patching OrangeFox to PERMISSIVE..."
+             echo ">>> Patching OrangeFox (Permissive)..."
              magiskboot unpack boot.img
-             
-             # Патчим cmdline
              if [ -f header ]; then
-                # Добавляем флаг permissive, если его нет
                 if ! grep -q "androidboot.selinux=permissive" header; then
                     sed -i 's/$/ androidboot.selinux=permissive/' header
                 fi
              fi
-             
-             # Патчим ramdisk (включение ADB в рекавери)
-             if [ -f ramdisk.cpio ]; then
-                magiskboot cpio ramdisk.cpio extract
-                if [ ! -f default.prop ]; then touch default.prop; fi
-                sed -i 's/ro.secure=.*/ro.secure=0/' default.prop || echo "ro.secure=0" >> default.prop
-                sed -i 's/ro.debuggable=.*/ro.debuggable=1/' default.prop || echo "ro.debuggable=1" >> default.prop
-                sed -i 's/ro.adb.secure=.*/ro.adb.secure=0/' default.prop || echo "ro.adb.secure=0" >> default.prop
-                magiskboot cpio ramdisk.cpio "add 0600 default.prop default.prop"
-             fi
-             
              magiskboot repack boot.img
              mv new-boot.img boot.img
-             
-             # Чистим
-             rm -f header kernel ramdisk.cpio dtb default.prop
-             echo "✅ OrangeFox installed and patched successfully!"
+             rm -f header kernel ramdisk.cpio dtb
           else
-             echo "⚠️ OrangeFox download failed. Keeping Stock Boot."
-             # Восстанавливаем бэкап стокового бута
-             mv boot_stock_backup.img boot.img
+             echo ">>> ⚠️ OrangeFox download failed! Reverting to Stock Boot..."
+             # Если OFox не скачался, берем родное ядро
+             mv boot_stock.img boot.img
+             
+             # Но его тоже надо пропатчить на Permissive, чтобы порт запустился!
+             echo ">>> Patching Stock Boot (Permissive)..."
+             magiskboot unpack boot.img
+             if [ -f header ]; then
+                if ! grep -q "androidboot.selinux=permissive" header; then
+                    sed -i 's/$/ androidboot.selinux=permissive/' header
+                fi
+             fi
+             magiskboot repack boot.img
+             mv new-boot.img boot.img
+             rm -f header kernel ramdisk.cpio dtb
           fi
+          
+          # Удаляем бэкап, он больше не нужен
+          rm -f boot_stock.img
 
       # 6. Упаковка
       - name: Pack ZIP
@@ -261,7 +282,7 @@ jobs:
 
           cat <<EOF > flash_all.bat
           @echo off
-          echo Starting Flash Process (With OrangeFox)...
+          echo Starting Flash Process...
           
           if not exist fastboot.exe (
               echo ERROR: fastboot.exe not found!
@@ -269,29 +290,20 @@ jobs:
               exit
           )
 
-          echo ------------------------------------------
-          echo STEP 1: Flashing Boot (OrangeFox)...
-          echo ------------------------------------------
-          :: Теперь boot.img - это OrangeFox
+          echo STEP 1: Flashing Boot...
           fastboot flash boot images/boot.img
-          
           echo Flashing DTBO/VBMETA...
           fastboot flash dtbo images/dtbo.img
           fastboot --disable-verity --disable-verification flash vbmeta images/vbmeta.img
 
           echo.
-          echo ------------------------------------------
           echo STEP 2: Rebooting to FASTBOOTD...
-          echo ------------------------------------------
           fastboot reboot fastboot
           echo Waiting 15 seconds for FastbootD...
           timeout /t 15 /nobreak > nul
 
           echo.
-          echo ------------------------------------------
           echo STEP 3: Flashing System...
-          echo ------------------------------------------
-          
           echo flashing vendor...
           fastboot flash vendor images/vendor.img
           if exist images\odm.img (
@@ -310,9 +322,7 @@ jobs:
           )
 
           echo.
-          echo ------------------------------------------
           echo STEP 4: Wiping Data...
-          echo ------------------------------------------
           fastboot -w
 
           echo.
@@ -322,7 +332,6 @@ jobs:
           EOF
 
           ZIP="${{ inputs.rom_name }}.zip"
-          echo ">>> Zipping..."
           sudo 7z a -tzip -mx1 -v2000m "$ZIP" .
           sudo chown $USER:$USER "$ZIP"*
           
@@ -332,15 +341,4 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           name: Alioth Port ${{ env.TAG }}
-          body: |
-            **ORANGEFOX EDITION**
-            - **Boot Image:** OrangeFox Recovery R11.1_6 (Stable).
-            - **Patched:** SELinux Permissive (Fixes bootloop).
-            - **System:** Repacked & Debloated.
-            
-            **Installation:**
-            1. Download all parts.
-            2. Extract.
-            3. Run `flash_all.bat`.
-            4. Phone will boot into OrangeFox first (allow system modification), then Reboot -> System.
           files: workspace/final/${{ inputs.rom_name }}.zip.*
