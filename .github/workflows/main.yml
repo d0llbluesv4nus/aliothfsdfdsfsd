@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (Final Fix)
+name: Poco F3 ROM Port (Safe Flash Fix)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         required: true
       rom_name:
         description: 'ZIP name'
-        default: 'Alioth_Port_Optimized'
+        default: 'Alioth_Port_Release'
 
 permissions:
   contents: write
@@ -47,12 +47,12 @@ jobs:
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # make_ext4fs (TWRPDtGen Mirror)
+          # make_ext4fs
           if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
              chmod +x make_ext4fs
              sudo mv make_ext4fs /usr/local/bin/
           else
-             echo "⚠️ make_ext4fs download failed. Using mke2fs fallback."
+             echo "⚠️ make_ext4fs failed. Will use mke2fs."
           fi
 
           # Magiskboot
@@ -62,67 +62,55 @@ jobs:
           chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
-          echo "✅ Все инструменты готовы."
+          echo "✅ Tools ready."
 
       - name: Prepare workspace
         run: mkdir -p workspace/{stock,port,final/images,assets,checks,repack_source}
 
-      # 3. Обработка STOCK (АБСОЛЮТНЫЕ ПУТИ)
+      # 3. Обработка STOCK
       - name: Process STOCK
         run: |
-          # Переменные с абсолютными путями
           WS="$GITHUB_WORKSPACE/workspace"
           FINAL="$WS/final/images"
           REPACK_SRC="$WS/repack_source"
           ASSETS="$WS/assets"
           
           cd "$WS/stock"
-          echo ">>> Скачивание стока..."
+          echo ">>> Downloading Stock..."
           aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
           tar -xf stock.tgz && rm stock.tgz
 
-          # Ищем папку images
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1); fi
-          
-          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
 
           SUPER=$(find . -name "super.img" | head -n1)
           if [ -f "$SUPER" ]; then
-             echo ">>> Распаковка super.img..."
              simg2img "$SUPER" super.raw
              lpunpack super.raw .
              rm super.raw
           fi
 
-          # Копируем физические файлы в FINAL
-          echo ">>> Copying boot/dtbo/vbmeta..."
           cp boot.img "$FINAL/"
           cp dtbo.img "$FINAL/"
           cp vbmeta.img "$FINAL/"
           
-          # Перемещаем vendor и odm в REPACK_SOURCE (для сжатия)
-          # Используем find/mv с xargs, чтобы точно найти файлы
-          echo ">>> Moving Vendor/ODM for optimization..."
+          # Move Vendor/ODM for optimization
           find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/vendor.img"
           find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/odm.img" || true
           
-          # Определение FS по Product
           PRODUCT=$(ls -S product*.img | head -1)
           if fsck.erofs --extract=product_fs "$PRODUCT"; then
              echo "STOCK_FS=erofs" >> $GITHUB_ENV
-             echo ">>> Сток использует EROFS"
           else
              echo "STOCK_FS=ext4" >> $GITHUB_ENV
-             echo ">>> Сток использует EXT4"
              7z x "$PRODUCT" -oproduct_fs
           fi
 
           find product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
           rm -rf product_fs
 
-      # 4. Обработка PORT (АБСОЛЮТНЫЕ ПУТИ)
+      # 4. Обработка PORT
       - name: Process PORT & Repack
         run: |
           WS="$GITHUB_WORKSPACE/workspace"
@@ -131,15 +119,13 @@ jobs:
           ASSETS="$WS/assets"
           
           cd "$WS/port"
-          echo ">>> Скачивание порта..."
+          echo ">>> Downloading Port..."
           aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
           tar -xf port.tgz && rm port.tgz
 
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "system.img" -printf "%h\n" | head -n1); fi
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1); fi
-          
-          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
           
           SUPER=$(find . -name "super.img" | head -n1)
@@ -149,14 +135,11 @@ jobs:
              rm super.raw
           fi
           
-          # Перемещаем файлы порта в REPACK_SOURCE
-          echo ">>> Moving Port System partitions..."
           find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system.img"
           find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system_ext.img"
           find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/product.img"
           find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/mi_ext.img" || true
 
-          # === ПЕРЕПАКОВКА ===
           cd "$REPACK_SRC"
           
           repack() {
@@ -170,7 +153,6 @@ jobs:
                fi
                rm "${NAME}.img"
 
-               # Inject fstab
                if [ -f "$ASSETS/fstab.qcom" ]; then
                   find extracted -name "fstab.*" -delete
                   cp "$ASSETS"/fstab.* extracted/etc/ 2>/dev/null || true
@@ -178,7 +160,6 @@ jobs:
                   cp "$ASSETS"/fstab.* extracted/vendor/etc/ 2>/dev/null || true
                fi
                
-               # DEBLOAT
                if [ "$NAME" == "product" ]; then
                    echo "   -> Debloating Product..."
                    sudo rm -rf extracted/data-app/*
@@ -190,7 +171,6 @@ jobs:
                    sudo rm -rf extracted/app/YouTube
                fi
 
-               # Repack
                OUTPUT_IMG="$FINAL/${NAME}.img"
                
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
@@ -203,7 +183,6 @@ jobs:
                   if command -v make_ext4fs >/dev/null; then
                       make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
                   else
-                      echo "      (Using mke2fs fallback)"
                       truncate -s ${SIZE_MB}M raw.img
                       mke2fs -t ext4 -b 4096 -L $NAME -M /$NAME -O ^has_journal -d extracted raw.img
                       img2simg raw.img "$OUTPUT_IMG"
@@ -236,12 +215,11 @@ jobs:
              rm -f kernel ramdisk.cpio dtb header
           fi
 
-      # 6. Упаковка и релиз
+      # 6. Упаковка и релиз (ИСПРАВЛЕН FLASH SCRIPT)
       - name: Pack ZIP
         run: |
           cd "$GITHUB_WORKSPACE/workspace/final"
           
-          echo ">>> Downloading Platform Tools..."
           wget -q https://dl.google.com/android/repository/platform-tools-latest-windows.zip -O tools.zip
           unzip -q tools.zip
           cp -r platform-tools/* .
@@ -269,38 +247,30 @@ jobs:
           echo STEP 2: Rebooting to FASTBOOTD...
           echo ------------------------------------------
           fastboot reboot fastboot
-          echo Waiting 10 seconds for FastbootD...
-          timeout /t 10 /nobreak > nul
+          echo Waiting 15 seconds for FastbootD...
+          timeout /t 15 /nobreak > nul
 
           echo.
           echo ------------------------------------------
-          echo STEP 3: Cleaning Old Partitions...
+          echo STEP 3: Flashing Logical Partitions...
           echo ------------------------------------------
-          fastboot delete-logical-partition product_a
-          fastboot delete-logical-partition product_b
-          fastboot delete-logical-partition system_a
-          fastboot delete-logical-partition system_b
-          fastboot delete-logical-partition vendor_a
-          fastboot delete-logical-partition vendor_b
-          fastboot delete-logical-partition odm_a
-          fastboot delete-logical-partition odm_b
-
-          echo.
-          echo ------------------------------------------
-          echo STEP 4: Flashing New Images...
-          echo ------------------------------------------
+          echo (We removed delete commands to avoid "No such file" errors)
+          
           echo flashing vendor...
           fastboot flash vendor images/vendor.img
+          
           if exist images\odm.img (
               echo flashing odm...
               fastboot flash odm images/odm.img
           )
+          
           echo flashing system...
           fastboot flash system images/system.img
           echo flashing system_ext...
           fastboot flash system_ext images/system_ext.img
           echo flashing product...
           fastboot flash product images/product.img
+          
           if exist images\mi_ext.img (
               echo flashing mi_ext...
               fastboot flash mi_ext images/mi_ext.img
@@ -308,7 +278,7 @@ jobs:
 
           echo.
           echo ------------------------------------------
-          echo STEP 5: Wiping Data...
+          echo STEP 4: Wiping Data...
           echo ------------------------------------------
           fastboot -w
 
@@ -329,4 +299,14 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           name: Alioth Port ${{ env.TAG }}
+          body: |
+            **SAFE FLASH VERSION**
+            - Removed `delete-logical-partition` commands (Fixes "No such file").
+            - Optimized Image Sizes (Vendor/ODM compressed).
+            - Includes Platform Tools.
+            
+            Instructions: 
+            1. Download all parts.
+            2. Extract.
+            3. Run `flash_all.bat`.
           files: workspace/final/${{ inputs.rom_name }}.zip.*
