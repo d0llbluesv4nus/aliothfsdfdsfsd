@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (STABLE TOOLS)
+name: Poco F3 ROM Port (Multi-Mirror Fix)
 
 on:
   workflow_dispatch:
@@ -35,36 +35,55 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (ИСПРАВЛЕНО)
+      # 2. Установка инструментов (СИСТЕМА ЗЕРКАЛ)
       - name: Install tools
         run: |
           sudo apt-get update
-          # erofs-utils уже есть в Ubuntu 22.04+
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils erofs-utils \
             build-essential liblz4-dev liblzma-dev uuid-dev e2fsprogs
 
           # 1. lpunpack (LineageOS 21 - Работает)
           echo ">>> Installing lpunpack..."
-          wget https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
+          wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # 2. make_ext4fs (ИСПРАВЛЕНО: Берем из Android Image Kitchen от osm0sis)
+          # 2. make_ext4fs (ЗЕРКАЛА)
           echo ">>> Installing make_ext4fs..."
-          wget https://raw.githubusercontent.com/osm0sis/Android-Image-Kitchen/master/AIK-Linux/bin/make_ext4fs
-          chmod +x make_ext4fs && sudo mv make_ext4fs /usr/local/bin/
+          URLS=(
+            "https://raw.githubusercontent.com/erfanoabdi/ErfanGSIs/master/bin/make_ext4fs"
+            "https://raw.githubusercontent.com/xiaoxindada/sgsi/master/bin/make_ext4fs"
+            "https://raw.githubusercontent.com/khaytsus/Termux_Packages/master/packages/make-ext4fs/make_ext4fs"
+          )
+          
+          INSTALLED=false
+          for URL in "${URLS[@]}"; do
+            echo "Trying: $URL"
+            if wget -q "$URL" -O make_ext4fs; then
+              if [ -s make_ext4fs ] && ! grep -q "404: Not Found" make_ext4fs; then
+                 chmod +x make_ext4fs
+                 sudo mv make_ext4fs /usr/local/bin/
+                 echo "✅ make_ext4fs installed successfully!"
+                 INSTALLED=true
+                 break
+              fi
+            fi
+          done
+          
+          if [ "$INSTALLED" = false ]; then
+             echo "❌ CRITICAL: Failed to download make_ext4fs from any mirror."
+             exit 1
+          fi
 
           # 3. Magiskboot (Официальный APK)
           echo ">>> Installing Magiskboot..."
-          wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip Magisk-v27.0.apk -d magisk
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
-          # Проверка
-          if ! command -v make_ext4fs >/dev/null; then echo "❌ make_ext4fs failed"; exit 1; fi
-          echo "✅ Все инструменты установлены."
+          echo "✅ Все инструменты готовы."
 
       - name: Prepare workspace
         run: mkdir -p workspace/{stock,port,final/images,assets,checks}
@@ -113,6 +132,7 @@ jobs:
           else
              echo "STOCK_FS=ext4" >> $GITHUB_ENV
              echo ">>> Сток использует EXT4"
+             # Если это ext4, распакуем 7z
              7z x "$PRODUCT" -oproduct_fs
           fi
 
