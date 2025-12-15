@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (Size Optimized)
+name: Poco F3 ROM Port (Final Fix)
 
 on:
   workflow_dispatch:
@@ -65,18 +65,27 @@ jobs:
           echo "✅ Все инструменты готовы."
 
       - name: Prepare workspace
-        run: mkdir -p workspace/{stock,port,final/images,assets,checks}
+        run: mkdir -p workspace/{stock,port,final/images,assets,checks,repack_source}
 
-      # 3. Обработка STOCK
+      # 3. Обработка STOCK (АБСОЛЮТНЫЕ ПУТИ)
       - name: Process STOCK
         run: |
-          cd workspace/stock
+          # Переменные с абсолютными путями
+          WS="$GITHUB_WORKSPACE/workspace"
+          FINAL="$WS/final/images"
+          REPACK_SRC="$WS/repack_source"
+          ASSETS="$WS/assets"
+          
+          cd "$WS/stock"
           echo ">>> Скачивание стока..."
           aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
           tar -xf stock.tgz && rm stock.tgz
 
+          # Ищем папку images
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1); fi
+          
+          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
 
           SUPER=$(find . -name "super.img" | head -n1)
@@ -87,18 +96,17 @@ jobs:
              rm super.raw
           fi
 
-          # Копируем физические файлы
-          cp boot.img ../../final/images/
-          cp dtbo.img ../../final/images/
-          cp vbmeta.img ../../final/images/
+          # Копируем физические файлы в FINAL
+          echo ">>> Copying boot/dtbo/vbmeta..."
+          cp boot.img "$FINAL/"
+          cp dtbo.img "$FINAL/"
+          cp vbmeta.img "$FINAL/"
           
-          # ВАЖНО: Мы НЕ копируем vendor и odm напрямую, мы их тоже будем перепаковывать, чтобы сжать!
-          # Просто перемещаем их во временную папку для анализа
-          mkdir -p ../../repack_source
-          
-          # Ищем vendor и odm и кладем в repack_source
-          find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/vendor.img
-          find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/odm.img || true
+          # Перемещаем vendor и odm в REPACK_SOURCE (для сжатия)
+          # Используем find/mv с xargs, чтобы точно найти файлы
+          echo ">>> Moving Vendor/ODM for optimization..."
+          find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/vendor.img"
+          find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/odm.img" || true
           
           # Определение FS по Product
           PRODUCT=$(ls -S product*.img | head -1)
@@ -111,13 +119,18 @@ jobs:
              7z x "$PRODUCT" -oproduct_fs
           fi
 
-          find product_fs -name "fstab.*" -exec cp {} ../../assets/ \; || true
+          find product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
           rm -rf product_fs
 
-      # 4. Обработка PORT
+      # 4. Обработка PORT (АБСОЛЮТНЫЕ ПУТИ)
       - name: Process PORT & Repack
         run: |
-          cd workspace/port
+          WS="$GITHUB_WORKSPACE/workspace"
+          REPACK_SRC="$WS/repack_source"
+          FINAL="$WS/final/images"
+          ASSETS="$WS/assets"
+          
+          cd "$WS/port"
           echo ">>> Скачивание порта..."
           aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
           tar -xf port.tgz && rm port.tgz
@@ -125,6 +138,8 @@ jobs:
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "system.img" -printf "%h\n" | head -n1); fi
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1); fi
+          
+          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
           
           SUPER=$(find . -name "super.img" | head -n1)
@@ -134,16 +149,15 @@ jobs:
              rm super.raw
           fi
           
-          # Перемещаем файлы порта тоже в repack_source
-          mkdir -p ../../repack_source
-          
-          find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/system.img
-          find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/system_ext.img
-          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/product.img
-          find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} ../../repack_source/mi_ext.img || true
+          # Перемещаем файлы порта в REPACK_SOURCE
+          echo ">>> Moving Port System partitions..."
+          find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system.img"
+          find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system_ext.img"
+          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/product.img"
+          find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/mi_ext.img" || true
 
-          # === НАЧИНАЕМ ПЕРЕПАКОВКУ (ВСЕХ ФАЙЛОВ) ===
-          cd ../../repack_source
+          # === ПЕРЕПАКОВКА ===
+          cd "$REPACK_SRC"
           
           repack() {
             NAME=$1
@@ -156,15 +170,15 @@ jobs:
                fi
                rm "${NAME}.img"
 
-               # Inject fstab (для всех)
-               if [ -f ../assets/fstab.qcom ]; then
+               # Inject fstab
+               if [ -f "$ASSETS/fstab.qcom" ]; then
                   find extracted -name "fstab.*" -delete
-                  cp ../assets/fstab.* extracted/etc/ 2>/dev/null || true
+                  cp "$ASSETS"/fstab.* extracted/etc/ 2>/dev/null || true
                   mkdir -p extracted/vendor/etc 2>/dev/null || true
-                  cp ../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || true
+                  cp "$ASSETS"/fstab.* extracted/vendor/etc/ 2>/dev/null || true
                fi
                
-               # DEBLOAT для product
+               # DEBLOAT
                if [ "$NAME" == "product" ]; then
                    echo "   -> Debloating Product..."
                    sudo rm -rf extracted/data-app/*
@@ -173,18 +187,17 @@ jobs:
                    sudo rm -rf extracted/app/MiVideoGlobal
                    sudo rm -rf extracted/app/Facebook*
                    sudo rm -rf extracted/priv-app/Facebook*
+                   sudo rm -rf extracted/app/YouTube
                fi
 
                # Repack
-               OUTPUT_IMG="../final/images/${NAME}.img"
+               OUTPUT_IMG="$FINAL/${NAME}.img"
                
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
                   echo "   -> Packing to EROFS (Compressed)..."
-                  # zlz4hc дает лучшее сжатие чем просто zlz4, это уменьшит размер
                   mkfs.erofs -zlz4hc -C16384 "$OUTPUT_IMG" extracted
                else
                   echo "   -> Packing to EXT4 (Sparse)..."
-                  # Размер: реальный занятый объем + 100МБ запаса
                   SIZE_MB=$(du -sm extracted | awk '{print $1+100}')
                   
                   if command -v make_ext4fs >/dev/null; then
@@ -201,8 +214,6 @@ jobs:
             fi
           }
 
-          # Теперь мы перепаковываем ВООБЩЕ ВСЁ, включая vendor и odm
-          # Это гарантирует, что они будут сжаты (sparse) и влезут в телефон
           repack vendor
           repack odm
           repack system
@@ -265,7 +276,6 @@ jobs:
           echo ------------------------------------------
           echo STEP 3: Cleaning Old Partitions...
           echo ------------------------------------------
-          :: Удаляем старые разделы, чтобы освободить место
           fastboot delete-logical-partition product_a
           fastboot delete-logical-partition product_b
           fastboot delete-logical-partition system_a
@@ -279,22 +289,18 @@ jobs:
           echo ------------------------------------------
           echo STEP 4: Flashing New Images...
           echo ------------------------------------------
-          
           echo flashing vendor...
           fastboot flash vendor images/vendor.img
-          
           if exist images\odm.img (
               echo flashing odm...
               fastboot flash odm images/odm.img
           )
-          
           echo flashing system...
           fastboot flash system images/system.img
           echo flashing system_ext...
           fastboot flash system_ext images/system_ext.img
           echo flashing product...
           fastboot flash product images/product.img
-          
           if exist images\mi_ext.img (
               echo flashing mi_ext...
               fastboot flash mi_ext images/mi_ext.img
@@ -323,14 +329,4 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           name: Alioth Port ${{ env.TAG }}
-          body: |
-            **SIZE OPTIMIZED VERSION**
-            - Auto-shrinks ODM and VENDOR partitions (fixes "Not enough space").
-            - Auto-deletes old partitions before flashing.
-            - Includes Platform Tools.
-            
-            Instructions: 
-            1. Download all parts.
-            2. Extract.
-            3. Run `flash_all.bat`.
           files: workspace/final/${{ inputs.rom_name }}.zip.*
