@@ -7,7 +7,7 @@ on:
         description: "Stock fastboot ROM (alioth)"
         required: true
       port_url:
-        description: "Port / Donor ROM (OEM)"
+        description: "Donor / OEM fastboot ROM"
         required: true
       rom_name:
         description: "Output ZIP name"
@@ -36,8 +36,17 @@ jobs:
           sudo apt clean
           df -h
 
+      - name: Check free space
+        run: |
+          AVAIL=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "Free space: ${AVAIL}G"
+          if [ "$AVAIL" -lt 20 ]; then
+            echo "❌ Not enough disk space"
+            exit 1
+          fi
+
       # ===============================
-      # INSTALL TOOLS
+      # INSTALL TOOLS (MINIMAL)
       # ===============================
       - name: Install tools
         run: |
@@ -46,7 +55,7 @@ jobs:
             aria2 p7zip-full unzip \
             erofs-utils e2fsprogs \
             build-essential git \
-            android-sdk-libsparse-utils \
+            libsparse-utils \
             liblz4-tool
 
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O /usr/local/bin/lpunpack
@@ -70,7 +79,7 @@ jobs:
           mkdir -p workspace/{stock,port,work,final/images,assets}
 
       # ===============================
-      # EXTRACT STOCK
+      # PROCESS STOCK ROM
       # ===============================
       - name: Process STOCK
         run: |
@@ -82,6 +91,7 @@ jobs:
 
           simg2img super.img super.raw
           lpunpack super.raw .
+
           cp boot.img ../../final/images/boot_stock.img
           cp dtbo.img ../../final/images/
           cp vbmeta.img ../../final/images/
@@ -91,7 +101,7 @@ jobs:
           mv product*.img ../../work/stock_product.img
 
       # ===============================
-      # EXTRACT PORT
+      # PROCESS PORT ROM
       # ===============================
       - name: Process PORT
         run: |
@@ -110,7 +120,7 @@ jobs:
           mv mi_ext*.img ../../work/mi_ext.img || true
 
       # ===============================
-      # ANALYZE AND PATCH
+      # PATCH & REPACK
       # ===============================
       - name: Patch partitions
         run: |
@@ -123,9 +133,6 @@ jobs:
           ANDROID=$(grep ro.build.version.release $PROP | cut -d= -f2)
           PATCH=$(grep ro.build.version.security_patch $PROP | cut -d= -f2)
 
-          echo "ANDROID=$ANDROID" >> $GITHUB_ENV
-          echo "PATCH=$PATCH" >> $GITHUB_ENV
-
           repack() {
             NAME=$1
             IMG=$NAME.img
@@ -136,7 +143,7 @@ jobs:
             [ -f "$PROP" ] && sed -i \
               -e "s/ro.build.version.release=.*/ro.build.version.release=$ANDROID/" \
               -e "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PATCH/" \
-              $PROP
+              "$PROP"
             mkfs.erofs -zlz4hc ../final/images/$IMG out
             rm -rf out
           }
@@ -149,7 +156,7 @@ jobs:
           repack odm
 
       # ===============================
-      # REBUILD SUPER.IMG
+      # BUILD SUPER.IMG
       # ===============================
       - name: Build super.img
         run: |
@@ -170,7 +177,7 @@ jobs:
             --output super.img
 
       # ===============================
-      # ORANGEFOX + CUSTOM KERNEL
+      # PATCH BOOT (ORANGEFOX)
       # ===============================
       - name: Patch boot
         run: |
