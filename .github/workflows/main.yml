@@ -1,160 +1,202 @@
-name: Alioth Universal Port (Fastboot + Recovery ROM, A14–A16)
+name: Alioth Universal OEM Port
 
 on:
   workflow_dispatch:
     inputs:
       stock_url:
-        description: Xiaomi STOCK Fastboot ROM (alioth)
+        description: "Stock fastboot ROM (alioth)"
         required: true
       port_url:
-        description: OEM ROM (Fastboot or Recovery)
+        description: "Port / Donor ROM (OEM)"
         required: true
       rom_name:
-        default: Alioth_Universal_Port
+        description: "Output ZIP name"
+        default: "Alioth_Universal_Port"
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
-      - uses: jlumbroso/free-disk-space@main
 
-      # ===== TOOLS =====
+      # ===============================
+      # AGGRESSIVE DISK CLEANUP
+      # ===============================
+      - name: Free disk space (aggressive)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/share/swift
+          sudo apt clean
+          df -h
+
+      # ===============================
+      # INSTALL TOOLS
+      # ===============================
       - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y aria2 p7zip-full unzip \
-            android-sdk-libsparse-utils erofs-utils \
-            e2fsprogs build-essential git
+          sudo apt install -y --no-install-recommends \
+            aria2 p7zip-full unzip \
+            erofs-utils e2fsprogs \
+            build-essential git \
+            android-sdk-libsparse-utils \
+            liblz4-tool
 
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O /usr/local/bin/lpunpack
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpmake -O /usr/local/bin/lpmake
           chmod +x /usr/local/bin/lp*
 
-          git clone https://github.com/vm03/payload-dumper-go /tmp/payload
-          cd /tmp/payload && go build
+          wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O /usr/local/bin/make_ext4fs
+          chmod +x /usr/local/bin/make_ext4fs
 
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
+          unzip -q Magisk-v27.0.apk -d magisk
+          cp magisk/lib/x86_64/libmagiskboot.so /usr/local/bin/magiskboot
+          chmod +x /usr/local/bin/magiskboot
+          rm -rf magisk Magisk-v27.0.apk
+
+      # ===============================
+      # PREPARE WORKSPACE
+      # ===============================
       - name: Prepare workspace
-        run: mkdir -p ws/{stock,port,src,out,extras,tools}
-
-      # ===== STOCK =====
-      - name: Extract STOCK fastboot
         run: |
-          cd ws/stock
-          aria2c ${{ inputs.stock_url }} -o stock.tgz
-          tar -xf stock.tgz
-          simg2img images/super.img super.raw
-          lpunpack super.raw .
-          cp boot.img dtbo.img vbmeta.img ../out/
-          [ -f init_boot.img ] && cp init_boot.img ../out/
-          mv vendor*.img ../src/
-          ls odm*.img >/dev/null 2>&1 && mv odm*.img ../src/
+          mkdir -p workspace/{stock,port,work,final/images,assets}
 
-      # ===== PORT (FASTBOOT OR RECOVERY) =====
-      - name: Extract PORT
-        run: |
-          cd ws/port
-          aria2c ${{ inputs.port_url }} -o port.zip
-
-          if unzip -l port.zip | grep -q payload.bin; then
-            unzip port.zip payload.bin
-            /tmp/payload/payload-dumper-go payload.bin
-            mv output/* .
-          else
-            unzip port.zip
-            simg2img images/super.img super.raw
-            lpunpack super.raw .
-          fi
-
-          mv system*.img ../src/
-          ls system_ext*.img >/dev/null 2>&1 && mv system_ext*.img ../src/
-          mv product*.img ../src/port_product.img
-
-      # ===== REPACK =====
-      - name: Repack system / product
+      # ===============================
+      # EXTRACT STOCK
+      # ===============================
+      - name: Process STOCK
         run: |
           set -e
-          cd ws/src
+          cd workspace/stock
+          aria2c -x4 "${{ inputs.stock_url }}" -o stock.tgz
+          tar -xf stock.tgz
+          cd $(find . -name images | head -n1)
 
-          extract() {
-            rm -rf out && mkdir out
-            fsck.erofs --extract=out "$1" || 7z x "$1" -oout
-          }
+          simg2img super.img super.raw
+          lpunpack super.raw .
+          cp boot.img ../../final/images/boot_stock.img
+          cp dtbo.img ../../final/images/
+          cp vbmeta.img ../../final/images/
 
-          extract port_product.img
-          PROP=$(find out -name build.prop | head -n1)
-          ANDROID=$(grep ro.build.version.release "$PROP" | cut -d= -f2)
-          PATCH=$(grep ro.build.version.security_patch "$PROP" | cut -d= -f2)
-          rm -rf out
+          mv vendor*.img ../../work/vendor.img
+          mv odm*.img ../../work/odm.img || true
+          mv product*.img ../../work/stock_product.img
 
-          clean_oem() {
-            rm -rf out/overlay out/*/overlay
-            rm -rf out/etc/init/*.rc out/*/etc/init/*.rc
-            rm -rf out/priv-app/*Color* out/priv-app/*Oppo* out/priv-app/*Meizu*
-          }
+      # ===============================
+      # EXTRACT PORT
+      # ===============================
+      - name: Process PORT
+        run: |
+          set -e
+          cd workspace/port
+          aria2c -x4 "${{ inputs.port_url }}" -o port.tgz
+          tar -xf port.tgz
+          cd $(find . -name images | head -n1)
+
+          simg2img super.img super.raw
+          lpunpack super.raw .
+
+          mv system*.img ../../work/system.img
+          mv system_ext*.img ../../work/system_ext.img
+          mv product*.img ../../work/port_product.img
+          mv mi_ext*.img ../../work/mi_ext.img || true
+
+      # ===============================
+      # ANALYZE AND PATCH
+      # ===============================
+      - name: Patch partitions
+        run: |
+          set -e
+          cd workspace/work
+
+          fsck.erofs --extract=pp port_product.img || 7z x port_product.img -opp
+          PROP=$(find pp -name build.prop | head -n1)
+
+          ANDROID=$(grep ro.build.version.release $PROP | cut -d= -f2)
+          PATCH=$(grep ro.build.version.security_patch $PROP | cut -d= -f2)
+
+          echo "ANDROID=$ANDROID" >> $GITHUB_ENV
+          echo "PATCH=$PATCH" >> $GITHUB_ENV
 
           repack() {
-            NAME="$1"
-            IMG="$2"
-            extract "$IMG"
-            clean_oem
+            NAME=$1
+            IMG=$NAME.img
+            [ ! -f "$IMG" ] && return
+            rm -rf out
+            fsck.erofs --extract=out $IMG || 7z x $IMG -oout
             PROP=$(find out -name build.prop | head -n1)
-            sed -i "s/ro.build.version.release=.*/ro.build.version.release=$ANDROID/" "$PROP"
-            sed -i "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PATCH/" "$PROP"
-            if [ "$NAME" = "product" ]; then
-              printf "\nro.product.device=alioth\nro.product.model=M2012K11AC\nro.product.name=alioth\n" >> "$PROP"
-            fi
-            mkfs.erofs -zlz4hc ../out/$NAME.img out
+            [ -f "$PROP" ] && sed -i \
+              -e "s/ro.build.version.release=.*/ro.build.version.release=$ANDROID/" \
+              -e "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PATCH/" \
+              $PROP
+            mkfs.erofs -zlz4hc ../final/images/$IMG out
             rm -rf out
           }
 
-          repack system system*.img
-          ls system_ext*.img >/dev/null 2>&1 && repack system_ext system_ext*.img
-          repack product port_product.img
+          repack system
+          repack system_ext
+          repack product
+          repack mi_ext
+          repack vendor
+          repack odm
 
-          cp vendor*.img ../out/
-          ls odm*.img >/dev/null 2>&1 && cp odm*.img ../out/
-
-      # ===== SUPER =====
+      # ===============================
+      # REBUILD SUPER.IMG
+      # ===============================
       - name: Build super.img
         run: |
-          cd ws/out
-          SIZE=9126805504
-          CMD="lpmake --metadata-size 65536 --super-name super --device super:$SIZE --group main:$SIZE"
-          for p in system system_ext product vendor odm; do
-            [ -f $p.img ] && CMD="$CMD --partition $p:readonly:$(stat -c%s $p.img):main --image $p=$p.img"
-          done
-          eval "$CMD --output super.img"
+          cd workspace/final/images
+          lpmake \
+            --metadata-size 65536 \
+            --super-name super \
+            --device super:9126805504 \
+            --group main:9126805504 \
+            --partition system:readonly:$(stat -c%s system.img):main \
+            --partition system_ext:readonly:$(stat -c%s system_ext.img):main \
+            --partition product:readonly:$(stat -c%s product.img):main \
+            --partition vendor:readonly:$(stat -c%s vendor.img):main \
+            --image system=system.img \
+            --image system_ext=system_ext.img \
+            --image product=product.img \
+            --image vendor=vendor.img \
+            --output super.img
 
-      # ===== EXTRAS =====
-      - name: Fetch OrangeFox & Kernel
+      # ===============================
+      # ORANGEFOX + CUSTOM KERNEL
+      # ===============================
+      - name: Patch boot
         run: |
-          wget -q https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip -O ofox.zip || true
-          [ -f ofox.zip ] && unzip -q ofox.zip recovery.img && mv recovery.img ws/extras/ || true
-          wget -q https://github.com/re-noroi/kernel_sm8250/releases/download/1.9-W/vendor_boot.img -O ws/extras/vendor_boot.img || true
+          cd workspace/final/images
+          wget -q https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip
+          unzip -q OrangeFox*.zip recovery.img || true
+          [ -f recovery.img ] && mv recovery.img boot.img || mv boot_stock.img boot.img
 
-      # ===== ADB TOOLS =====
-      - name: Add ADB logcat tools
-        run: |
-          wget -q https://dl.google.com/android/repository/platform-tools-latest-linux.zip -O adb.zip
-          unzip -q adb.zip
-          mv platform-tools ws/tools
-          printf "#!/bin/bash\nadb wait-for-device\nadb logcat -b all -v time > boot_logcat.txt\n" > ws/tools/capture_logcat.sh
-          printf "#!/bin/bash\nadb wait-for-device\nadb shell cat /tmp/recovery.log > recovery_log.txt\n" > ws/tools/capture_recovery.sh
-          chmod +x ws/tools/*.sh
+          magiskboot unpack boot.img
+          sed -i 's/$/ androidboot.selinux=permissive/' header
+          magiskboot repack boot.img
+          mv new-boot.img boot.img
 
-      # ===== ZIP =====
+      # ===============================
+      # PACKAGE ZIP
+      # ===============================
       - name: Pack ZIP
         run: |
-          cd ws
-          7z a ${{ inputs.rom_name }}.zip out extras tools
+          cd workspace/final
+          ZIP="${{ inputs.rom_name }}.zip"
+          7z a -tzip $ZIP .
+          echo "TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - uses: softprops/action-gh-release@v1
         with:
-          tag_name: v$(date +%Y%m%d-%H%M)
-          files: ws/${{ inputs.rom_name }}.zip
+          tag_name: ${{ env.TAG }}
+          name: Alioth Universal Port
+          files: workspace/final/*.zip
           
