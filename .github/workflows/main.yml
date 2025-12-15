@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (Native Linux Tools)
+name: Poco F3 ROM Port (Absolute Paths Fix)
 
 on:
   workflow_dispatch:
@@ -39,29 +39,23 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          # Устанавливаем erofs-utils и e2fsprogs (для mke2fs) из репозитория
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils erofs-utils \
             build-essential liblz4-dev liblzma-dev uuid-dev e2fsprogs
 
           # 1. lpunpack (LineageOS)
-          echo ">>> Installing lpunpack..."
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # 2. make_ext4fs (Попытка скачать из надежного источника)
-          echo ">>> Installing make_ext4fs..."
-          # Ссылка из репозитория бинарников TWRPDtGen
+          # 2. make_ext4fs (TWRPDtGen Mirror - Reliable)
           if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
              chmod +x make_ext4fs
              sudo mv make_ext4fs /usr/local/bin/
-             echo "✅ make_ext4fs downloaded."
           else
-             echo "⚠️ make_ext4fs download failed. Will use mke2fs fallback."
+             echo "⚠️ make_ext4fs download failed. Using mke2fs fallback."
           fi
 
-          # 3. Magiskboot (Официальный APK)
-          echo ">>> Installing Magiskboot..."
+          # 3. Magiskboot
           wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip -q Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
@@ -73,10 +67,15 @@ jobs:
       - name: Prepare workspace
         run: mkdir -p workspace/{stock,port,final/images,assets,checks}
 
-      # 3. Обработка STOCK
+      # 3. Обработка STOCK (С АБСОЛЮТНЫМИ ПУТЯМИ)
       - name: Process STOCK
         run: |
-          cd workspace/stock
+          # Определяем абсолютные пути, чтобы не путаться в папках
+          WORKSPACE_ROOT="$GITHUB_WORKSPACE/workspace"
+          FINAL_DIR="$WORKSPACE_ROOT/final/images"
+          ASSETS_DIR="$WORKSPACE_ROOT/assets"
+          
+          cd "$WORKSPACE_ROOT/stock"
           echo ">>> Скачивание стока..."
           aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
           
@@ -84,10 +83,13 @@ jobs:
           tar -xf stock.tgz
           rm stock.tgz
 
+          # Ищем папку images
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then
              IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1)
           fi
+          
+          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
 
           SUPER=$(find . -name "super.img" | head -n1)
@@ -98,17 +100,17 @@ jobs:
              rm super.raw
           fi
 
-          # Копирование файлов
-          cp boot.img ../../final/images/
-          cp dtbo.img ../../final/images/
-          cp vbmeta.img ../../final/images/
+          # ИСПРАВЛЕНО: Копируем по абсолютным путям
+          echo ">>> Копирование файлов в $FINAL_DIR..."
+          cp boot.img "$FINAL_DIR/"
+          cp dtbo.img "$FINAL_DIR/"
+          cp vbmeta.img "$FINAL_DIR/"
           
           VENDOR=$(ls -S vendor*.img | head -1)
-          cp "$VENDOR" ../../final/images/vendor.img
+          cp "$VENDOR" "$FINAL_DIR/vendor.img"
           
-          # Определение FS и извлечение fstab
+          # Определение FS
           PRODUCT=$(ls -S product*.img | head -1)
-          
           if fsck.erofs --extract=product_fs "$PRODUCT"; then
              echo "STOCK_FS=erofs" >> $GITHUB_ENV
              echo ">>> Сток использует EROFS"
@@ -118,13 +120,18 @@ jobs:
              7z x "$PRODUCT" -oproduct_fs
           fi
 
-          find product_fs -name "fstab.*" -exec cp {} ../../assets/ \; || true
+          # Сохранение fstab
+          find product_fs -name "fstab.*" -exec cp {} "$ASSETS_DIR/" \; || true
           rm -rf product_fs
 
-      # 4. Обработка PORT
+      # 4. Обработка PORT (С АБСОЛЮТНЫМИ ПУТЯМИ)
       - name: Process PORT & Repack
         run: |
-          cd workspace/port
+          WORKSPACE_ROOT="$GITHUB_WORKSPACE/workspace"
+          FINAL_DIR="$WORKSPACE_ROOT/final/images"
+          ASSETS_DIR="$WORKSPACE_ROOT/assets"
+          
+          cd "$WORKSPACE_ROOT/port"
           echo ">>> Скачивание порта..."
           aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
           
@@ -134,6 +141,8 @@ jobs:
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "system.img" -printf "%h\n" | head -n1); fi
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1); fi
+          
+          echo ">>> Переход в: $IMG_DIR"
           cd "$IMG_DIR"
           
           SUPER=$(find . -name "super.img" | head -n1)
@@ -155,46 +164,37 @@ jobs:
                echo ">>> Processing $NAME ($IMG)..."
                rm -rf extracted && mkdir extracted
                
-               # Распаковка
                if ! fsck.erofs --extract=extracted "$IMG" 2>/dev/null; then
                   7z x "$IMG" -oextracted > /dev/null
                fi
                rm "$IMG"
 
                # Inject fstab
-               if [ -f ../../assets/fstab.qcom ]; then
+               if ls "$ASSETS_DIR"/fstab.* 1> /dev/null 2>&1; then
                   echo "   -> Injecting stock fstab..."
                   find extracted -name "fstab.*" -delete
-                  cp ../../assets/fstab.* extracted/etc/ 2>/dev/null || true
+                  cp "$ASSETS_DIR"/fstab.* extracted/etc/ 2>/dev/null || true
                   mkdir -p extracted/vendor/etc 2>/dev/null || true
-                  cp ../../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || true
+                  cp "$ASSETS_DIR"/fstab.* extracted/vendor/etc/ 2>/dev/null || true
                fi
 
                # Repack
+               OUTPUT_IMG="$FINAL_DIR/${NAME}.img"
+               
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
-                  # EROFS REPACK
                   echo "   -> Repacking to EROFS (LZ4)..."
-                  mkfs.erofs -zlz4 -C16384 ../../final/images/${NAME}.img extracted
+                  mkfs.erofs -zlz4 -C16384 "$OUTPUT_IMG" extracted
                else
-                  # EXT4 REPACK
                   echo "   -> Repacking to EXT4..."
-                  
-                  # Используем make_ext4fs если есть, иначе mke2fs (Native Linux method)
                   SIZE_MB=$(du -sm extracted | awk '{print $1+150}')
-                  SIZE_BYTES=$(($SIZE_MB * 1024 * 1024))
                   
                   if command -v make_ext4fs >/dev/null; then
-                      make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME ../../final/images/${NAME}.img extracted/
+                      make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
                   else
                       echo "      (Using mke2fs fallback)"
-                      # 1. Создаем пустой файл нужного размера
                       truncate -s ${SIZE_MB}M raw.img
-                      # 2. Форматируем в ext4 и заливаем файлы (-d)
-                      # -O ^has_journal (без журнала, как на андроид)
-                      # -M /$NAME (точка монтирования)
                       mke2fs -t ext4 -b 4096 -L $NAME -M /$NAME -O ^has_journal -d extracted raw.img
-                      # 3. Конвертируем в Sparse (сжатый андроид формат)
-                      img2simg raw.img ../../final/images/${NAME}.img
+                      img2simg raw.img "$OUTPUT_IMG"
                       rm raw.img
                   fi
                fi
@@ -211,7 +211,7 @@ jobs:
       # 5. Патч boot
       - name: Patch boot
         run: |
-          cd workspace/final/images
+          cd "$GITHUB_WORKSPACE/workspace/final/images"
           if [ -f boot.img ]; then
              echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
@@ -226,7 +226,7 @@ jobs:
       # 6. Упаковка и релиз
       - name: Pack ZIP
         run: |
-          cd workspace/final
+          cd "$GITHUB_WORKSPACE/workspace/final"
           cat <<EOF > flash_all.bat
           @echo off
           fastboot flash boot images/boot.img
@@ -242,7 +242,10 @@ jobs:
           EOF
 
           ZIP="${{ inputs.rom_name }}.zip"
-          7z a -tzip -mx1 -v2000m "$ZIP" .
+          # Используем sudo для упаковки, если есть проблемы с правами
+          sudo 7z a -tzip -mx1 -v2000m "$ZIP" .
+          sudo chown $USER:$USER "$ZIP"*
+          
           echo "TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - uses: softprops/action-gh-release@v1
