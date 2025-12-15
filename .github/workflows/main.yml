@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (FIXED TOOLS)
+name: Poco F3 ROM Port (STABLE TOOLS)
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Очистка места (30+ GB)
+      # 1. Очистка места
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -35,30 +35,35 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов
+      # 2. Установка инструментов (ИСПРАВЛЕНО)
       - name: Install tools
         run: |
           sudo apt-get update
-          # erofs-utils уже есть в репозитории Ubuntu 22.04+, компиляция не нужна!
+          # erofs-utils уже есть в Ubuntu 22.04+
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils erofs-utils \
             build-essential liblz4-dev liblzma-dev uuid-dev e2fsprogs
 
-          # Утилита lpunpack (LineageOS 21 - OK)
+          # 1. lpunpack (LineageOS 21 - Работает)
+          echo ">>> Installing lpunpack..."
           wget https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # Утилита make_ext4fs (LineageOS 18.1 - В 21 версии её удалили, поэтому была ошибка 404!)
-          wget https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-18.1/linux-x86/bin/make_ext4fs
+          # 2. make_ext4fs (ИСПРАВЛЕНО: Берем из Android Image Kitchen от osm0sis)
+          echo ">>> Installing make_ext4fs..."
+          wget https://raw.githubusercontent.com/osm0sis/Android-Image-Kitchen/master/AIK-Linux/bin/make_ext4fs
           chmod +x make_ext4fs && sudo mv make_ext4fs /usr/local/bin/
 
-          # Magiskboot (Официальный APK)
+          # 3. Magiskboot (Официальный APK)
+          echo ">>> Installing Magiskboot..."
           wget https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
           unzip Magisk-v27.0.apk -d magisk
           cp magisk/lib/x86_64/libmagiskboot.so magiskboot
           chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
           rm -rf magisk Magisk-v27.0.apk
 
+          # Проверка
+          if ! command -v make_ext4fs >/dev/null; then echo "❌ make_ext4fs failed"; exit 1; fi
           echo "✅ Все инструменты установлены."
 
       - name: Prepare workspace
@@ -75,18 +80,14 @@ jobs:
           tar -xf stock.tgz
           rm stock.tgz
 
-          # Заходим внутрь папки с прошивкой (Xiaomi кладет файлы в подпапку)
-          # Находим папку images где бы она ни была
+          # Умный поиск папки с образами
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then
-             # Если папки images нет, возможно файлы в корне (редко)
              IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1)
           fi
-          
-          echo ">>> Переход в директорию образов: $IMG_DIR"
           cd "$IMG_DIR"
 
-          # Проверяем Super
+          # Распаковка Super
           SUPER=$(find . -name "super.img" | head -n1)
           if [ -f "$SUPER" ]; then
              echo ">>> Распаковка super.img..."
@@ -95,18 +96,15 @@ jobs:
              rm super.raw
           fi
 
-          # Копируем нужные файлы в папку сборки
-          echo ">>> Копирование boot/vendor/etc..."
+          # Копирование файлов
           cp boot.img ../../final/images/
           cp dtbo.img ../../final/images/
           cp vbmeta.img ../../final/images/
           
-          # Если vendor был в super, он уже здесь. Если отдельным файлом - тоже здесь.
-          # Берем самый большой файл (защита от пустышек _b)
           VENDOR=$(ls -S vendor*.img | head -1)
           cp "$VENDOR" ../../final/images/vendor.img
           
-          # Для определения FS смотрим на product
+          # Определение FS
           PRODUCT=$(ls -S product*.img | head -1)
           
           if fsck.erofs --extract=product_fs "$PRODUCT"; then
@@ -115,15 +113,11 @@ jobs:
           else
              echo "STOCK_FS=ext4" >> $GITHUB_ENV
              echo ">>> Сток использует EXT4"
-             # Если это ext4, распакуем 7z
              7z x "$PRODUCT" -oproduct_fs
           fi
 
-          # Сохраняем fstab из стока (важно для монтирования!)
-          echo ">>> Поиск fstab..."
+          # Сохранение fstab
           find product_fs -name "fstab.*" -exec cp {} ../../assets/ \; || true
-          
-          # Удаляем распакованный сток для экономии места
           rm -rf product_fs
 
       # 4. Обработка PORT
@@ -136,15 +130,9 @@ jobs:
           tar -xf port.tgz
           rm port.tgz
 
-          # Ищем папку с образами
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "system.img" -printf "%h\n" | head -n1); fi
-          
-          # Если system.img нет, ищем в super
-          if [ -z "$IMG_DIR" ]; then
-             IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1)
-          fi
-          
+          if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1); fi
           cd "$IMG_DIR"
           
           SUPER=$(find . -name "super.img" | head -n1)
@@ -154,11 +142,8 @@ jobs:
              rm super.raw
           fi
 
-          # Функция перепаковки
           repack() {
             NAME=$1
-            # Ищем самый большой файл (фильтруем пустышки)
-            # Исключаем system_ext когда ищем system
             if [ "$NAME" == "system" ]; then
                IMG=$(ls -S system.img system_a.img 2>/dev/null | head -1)
             else
@@ -169,57 +154,48 @@ jobs:
                echo ">>> Processing $NAME ($IMG)..."
                rm -rf extracted && mkdir extracted
                
-               # Распаковка (пробуем EROFS, иначе 7z для EXT4)
                if ! fsck.erofs --extract=extracted "$IMG" 2>/dev/null; then
                   7z x "$IMG" -oextracted > /dev/null
                fi
-               
-               rm "$IMG" # Удаляем оригинал
+               rm "$IMG"
 
-               # Подкидываем fstab из стока (Fix Mount Errors)
+               # Inject fstab
                if [ -f ../../assets/fstab.qcom ]; then
                   echo "   -> Injecting stock fstab..."
                   find extracted -name "fstab.*" -delete
-                  # Обычно fstab лежит в vendor/etc или system/etc
                   cp ../../assets/fstab.* extracted/etc/ 2>/dev/null || true
                   mkdir -p extracted/vendor/etc 2>/dev/null || true
                   cp ../../assets/fstab.* extracted/vendor/etc/ 2>/dev/null || true
                fi
 
-               # Собираем в нужный формат (как у стока)
+               # Repack
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
                   echo "   -> Repacking to EROFS (LZ4)..."
                   mkfs.erofs -zlz4 -C16384 ../../final/images/${NAME}.img extracted
                else
                   echo "   -> Repacking to EXT4..."
-                  # Вычисляем размер: текущий + 150МБ запаса
                   SIZE=$(du -sm extracted | awk '{print $1+150}')M
                   make_ext4fs -s -L $NAME -l $SIZE -a $NAME ../../final/images/${NAME}.img extracted/
                fi
-               
                rm -rf extracted
             fi
           }
 
-          # Запускаем перепаковку для основных разделов
           repack system
           repack system_ext
           repack product
           repack mi_ext
           repack odm
 
-      # 5. Патч boot (Hex Patch)
-      - name: Patch boot (SELinux Permissive)
+      # 5. Патч boot
+      - name: Patch boot
         run: |
           cd workspace/final/images
           if [ -f boot.img ]; then
-             echo ">>> Patching boot.img kernel..."
+             echo ">>> Patching boot.img..."
              magiskboot unpack boot.img
-             # Hexpatch: enforcing -> permissive
-             if [ -f kernel ]; then
-                magiskboot hexpatch kernel \
-                73656C696E75783D656E666F7263696E67 \
-                73656C696E75783D7065726D697373697665
+             if [ -f header ]; then
+                magiskboot hexpatch kernel 73656C696E75783D656E666F7263696E67 73656C696E75783D7065726D697373697665
              fi
              magiskboot repack boot.img
              mv new-boot.img boot.img
@@ -245,9 +221,7 @@ jobs:
           EOF
 
           ZIP="${{ inputs.rom_name }}.zip"
-          # Разбиваем архив на тома по 2GB (ограничение GitHub)
           7z a -tzip -mx1 -v2000m "$ZIP" .
-          
           echo "TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
 
       - uses: softprops/action-gh-release@v1
