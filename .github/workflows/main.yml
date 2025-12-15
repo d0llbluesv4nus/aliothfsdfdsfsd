@@ -1,4 +1,4 @@
-name: Poco F3 ROM Port (Multi-Mirror Fix)
+name: Poco F3 ROM Port (Native Linux Tools)
 
 on:
   workflow_dispatch:
@@ -35,44 +35,29 @@ jobs:
           docker-images: true
           swap-storage: false
 
-      # 2. Установка инструментов (СИСТЕМА ЗЕРКАЛ)
+      # 2. Установка инструментов
       - name: Install tools
         run: |
           sudo apt-get update
+          # Устанавливаем erofs-utils и e2fsprogs (для mke2fs) из репозитория
           sudo apt-get install -y aria2 p7zip-full git file unzip \
             android-sdk-libsparse-utils erofs-utils \
             build-essential liblz4-dev liblzma-dev uuid-dev e2fsprogs
 
-          # 1. lpunpack (LineageOS 21 - Работает)
+          # 1. lpunpack (LineageOS)
           echo ">>> Installing lpunpack..."
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # 2. make_ext4fs (ЗЕРКАЛА)
+          # 2. make_ext4fs (Попытка скачать из надежного источника)
           echo ">>> Installing make_ext4fs..."
-          URLS=(
-            "https://raw.githubusercontent.com/erfanoabdi/ErfanGSIs/master/bin/make_ext4fs"
-            "https://raw.githubusercontent.com/xiaoxindada/sgsi/master/bin/make_ext4fs"
-            "https://raw.githubusercontent.com/khaytsus/Termux_Packages/master/packages/make-ext4fs/make_ext4fs"
-          )
-          
-          INSTALLED=false
-          for URL in "${URLS[@]}"; do
-            echo "Trying: $URL"
-            if wget -q "$URL" -O make_ext4fs; then
-              if [ -s make_ext4fs ] && ! grep -q "404: Not Found" make_ext4fs; then
-                 chmod +x make_ext4fs
-                 sudo mv make_ext4fs /usr/local/bin/
-                 echo "✅ make_ext4fs installed successfully!"
-                 INSTALLED=true
-                 break
-              fi
-            fi
-          done
-          
-          if [ "$INSTALLED" = false ]; then
-             echo "❌ CRITICAL: Failed to download make_ext4fs from any mirror."
-             exit 1
+          # Ссылка из репозитория бинарников TWRPDtGen
+          if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
+             chmod +x make_ext4fs
+             sudo mv make_ext4fs /usr/local/bin/
+             echo "✅ make_ext4fs downloaded."
+          else
+             echo "⚠️ make_ext4fs download failed. Will use mke2fs fallback."
           fi
 
           # 3. Magiskboot (Официальный APK)
@@ -99,14 +84,12 @@ jobs:
           tar -xf stock.tgz
           rm stock.tgz
 
-          # Умный поиск папки с образами
           IMG_DIR=$(find . -type d -name "images" | head -n1)
           if [ -z "$IMG_DIR" ]; then
              IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1)
           fi
           cd "$IMG_DIR"
 
-          # Распаковка Super
           SUPER=$(find . -name "super.img" | head -n1)
           if [ -f "$SUPER" ]; then
              echo ">>> Распаковка super.img..."
@@ -123,7 +106,7 @@ jobs:
           VENDOR=$(ls -S vendor*.img | head -1)
           cp "$VENDOR" ../../final/images/vendor.img
           
-          # Определение FS
+          # Определение FS и извлечение fstab
           PRODUCT=$(ls -S product*.img | head -1)
           
           if fsck.erofs --extract=product_fs "$PRODUCT"; then
@@ -132,11 +115,9 @@ jobs:
           else
              echo "STOCK_FS=ext4" >> $GITHUB_ENV
              echo ">>> Сток использует EXT4"
-             # Если это ext4, распакуем 7z
              7z x "$PRODUCT" -oproduct_fs
           fi
 
-          # Сохранение fstab
           find product_fs -name "fstab.*" -exec cp {} ../../assets/ \; || true
           rm -rf product_fs
 
@@ -174,6 +155,7 @@ jobs:
                echo ">>> Processing $NAME ($IMG)..."
                rm -rf extracted && mkdir extracted
                
+               # Распаковка
                if ! fsck.erofs --extract=extracted "$IMG" 2>/dev/null; then
                   7z x "$IMG" -oextracted > /dev/null
                fi
@@ -190,12 +172,31 @@ jobs:
 
                # Repack
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
+                  # EROFS REPACK
                   echo "   -> Repacking to EROFS (LZ4)..."
                   mkfs.erofs -zlz4 -C16384 ../../final/images/${NAME}.img extracted
                else
+                  # EXT4 REPACK
                   echo "   -> Repacking to EXT4..."
-                  SIZE=$(du -sm extracted | awk '{print $1+150}')M
-                  make_ext4fs -s -L $NAME -l $SIZE -a $NAME ../../final/images/${NAME}.img extracted/
+                  
+                  # Используем make_ext4fs если есть, иначе mke2fs (Native Linux method)
+                  SIZE_MB=$(du -sm extracted | awk '{print $1+150}')
+                  SIZE_BYTES=$(($SIZE_MB * 1024 * 1024))
+                  
+                  if command -v make_ext4fs >/dev/null; then
+                      make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME ../../final/images/${NAME}.img extracted/
+                  else
+                      echo "      (Using mke2fs fallback)"
+                      # 1. Создаем пустой файл нужного размера
+                      truncate -s ${SIZE_MB}M raw.img
+                      # 2. Форматируем в ext4 и заливаем файлы (-d)
+                      # -O ^has_journal (без журнала, как на андроид)
+                      # -M /$NAME (точка монтирования)
+                      mke2fs -t ext4 -b 4096 -L $NAME -M /$NAME -O ^has_journal -d extracted raw.img
+                      # 3. Конвертируем в Sparse (сжатый андроид формат)
+                      img2simg raw.img ../../final/images/${NAME}.img
+                      rm raw.img
+                  fi
                fi
                rm -rf extracted
             fi
