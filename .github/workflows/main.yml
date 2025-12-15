@@ -1,4 +1,4 @@
-name: Poco F3 Port (OFox Fail-Safe)
+name: Poco F3 Port (FINAL VERSION)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         required: true
       rom_name:
         description: 'ZIP name'
-        default: 'Alioth_Port_Release'
+        default: 'Alioth_Port_Final'
 
 permissions:
   contents: write
@@ -47,12 +47,10 @@ jobs:
           wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
           chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
 
-          # make_ext4fs (TWRPDtGen Mirror)
+          # make_ext4fs
           if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
              chmod +x make_ext4fs
              sudo mv make_ext4fs /usr/local/bin/
-          else
-             echo "Using mke2fs fallback."
           fi
 
           # Magiskboot
@@ -63,7 +61,7 @@ jobs:
           rm -rf magisk Magisk-v27.0.apk
 
       - name: Prepare workspace
-        run: mkdir -p workspace/{stock,port,final/images,assets,checks,repack_source}
+        run: mkdir -p workspace/{stock,port,final/images,assets,repack_source}
 
       # 3. Обработка STOCK
       - name: Process STOCK
@@ -74,7 +72,6 @@ jobs:
           ASSETS="$WS/assets"
           
           cd "$WS/stock"
-          echo ">>> Downloading Stock..."
           aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
           tar -xf stock.tgz && rm stock.tgz
 
@@ -89,29 +86,15 @@ jobs:
              rm super.raw
           fi
 
-          # Бэкап стокового ядра (ВАЖНО для Fail-Safe)
+          # Сохраняем boot/dtbo/vbmeta
           cp boot.img "$FINAL/boot_stock.img"
           cp dtbo.img "$FINAL/"
           cp vbmeta.img "$FINAL/"
           
+          # Перемещаем vendor/odm/product для дальнейшей обработки
           find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/vendor.img"
           find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/odm.img" || true
-          
-          PRODUCT=$(ls -S product*.img | head -1)
-          if fsck.erofs --extract=product_fs "$PRODUCT"; then
-             echo "STOCK_FS=erofs" >> $GITHUB_ENV
-          else
-             echo "STOCK_FS=ext4" >> $GITHUB_ENV
-             7z x "$PRODUCT" -oproduct_fs
-          fi
-
-          find product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
-          
-          echo ">>> Saving alioth.xml..."
-          XML=$(find product_fs -name "alioth.xml" | head -n 1)
-          if [ -f "$XML" ]; then cp "$XML" "$ASSETS/"; fi
-
-          rm -rf product_fs
+          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/stock_product.img"
 
       # 4. Обработка PORT
       - name: Process PORT & Repack
@@ -122,7 +105,6 @@ jobs:
           ASSETS="$WS/assets"
           
           cd "$WS/port"
-          echo ">>> Downloading Port..."
           aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
           tar -xf port.tgz && rm port.tgz
 
@@ -138,24 +120,59 @@ jobs:
              rm super.raw
           fi
           
+          # Перемещаем файлы порта
           find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system.img"
           find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system_ext.img"
-          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/product.img"
+          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/port_product.img"
           find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/mi_ext.img" || true
 
+          # === НАЧИНАЕМ ПЕРЕПАКОВКУ ===
           cd "$REPACK_SRC"
           
+          # --- СНАЧАЛА ИЗВЛЕКАЕМ ИНФОРМАЦИЮ О ВЕРСИЯХ ---
+          echo ">>> Analyzing versions..."
+          # Распаковываем product от порта, чтобы узнать его версию Android и патч безопасности
+          fsck.erofs --extract=port_product_fs port_product.img || 7z x port_product.img -oport_product_fs >/dev/null
+          
+          # Находим build.prop и извлекаем нужные строки
+          PORT_PROP=$(find port_product_fs -name "build.prop" | head -n 1)
+          PORT_ANDROID_VERSION=$(grep "ro.product.build.version.release" "$PORT_PROP" | head -n 1 | awk -F'=' '{print $2}')
+          PORT_SECURITY_PATCH=$(grep "ro.build.version.security_patch" "$PORT_PROP" | head -n 1 | awk -F'=' '{print $2}')
+          
+          echo ">>> Port Android Version: $PORT_ANDROID_VERSION"
+          echo ">>> Port Security Patch: $PORT_SECURITY_PATCH"
+          
+          # Определяем FS стока по его product.img
+          if fsck.erofs --extract=stock_product_fs stock_product.img; then
+             echo "STOCK_FS=erofs" >> $GITHUB_ENV
+          else
+             echo "STOCK_FS=ext4" >> $GITHUB_ENV
+             7z x stock_product.img -ostock_product_fs
+          fi
+
+          # Сохраняем fstab и alioth.xml
+          find stock_product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
+          find stock_product_fs -name "alioth.xml" -exec cp {} "$ASSETS/" \; || true
+          rm -rf stock_product_fs # Больше не нужен
+
+          # --- Функция перепаковки ---
           repack() {
             NAME=$1
-            if [ -f "${NAME}.img" ]; then
-               echo ">>> Optimizing $NAME..."
+            IMG_NAME="${NAME}.img"
+            # Для product используем файл от порта
+            if [ "$NAME" == "product" ]; then IMG_NAME="port_product.img"; fi
+            
+            if [ -f "$IMG_NAME" ]; then
+               echo ">>> Processing $NAME..."
                rm -rf extracted && mkdir extracted
                
-               if ! fsck.erofs --extract=extracted "${NAME}.img" 2>/dev/null; then
-                  7z x "${NAME}.img" -oextracted > /dev/null
+               if ! fsck.erofs --extract=extracted "$IMG_NAME" 2>/dev/null; then
+                  7z x "$IMG_NAME" -oextracted > /dev/null
                fi
-               rm "${NAME}.img"
+               rm "$IMG_NAME"
 
+               # --- НАЧИНАЕМ ПАТЧИТЬ ---
+               # 1. fstab
                if [ -f "$ASSETS/fstab.qcom" ]; then
                   find extracted -name "fstab.*" -delete
                   cp "$ASSETS"/fstab.* extracted/etc/ 2>/dev/null || true
@@ -163,51 +180,43 @@ jobs:
                   cp "$ASSETS"/fstab.* extracted/vendor/etc/ 2>/dev/null || true
                fi
                
+               # 2. Патчим build.prop (для VENDOR и PRODUCT)
+               PROP=$(find extracted -name "build.prop" | head -n 1)
+               if [ -f "$PROP" ]; then
+                  echo "   -> Patching build.prop for $NAME..."
+                  # Меняем версию Android и патч на те, что у порта
+                  sed -i "s/ro.vendor.build.version.release=.*/ro.vendor.build.version.release=$PORT_ANDROID_VERSION/" "$PROP"
+                  sed -i "s/ro.vendor.build.version.security_patch=.*/ro.vendor.build.version.security_patch=$PORT_SECURITY_PATCH/" "$PROP"
+                  sed -i "s/ro.product.build.version.release=.*/ro.product.build.version.release=$PORT_ANDROID_VERSION/" "$PROP"
+                  sed -i "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PORT_SECURITY_PATCH/" "$PROP"
+                  
+                  # Если это product, добавляем инфу о девайсе
+                  if [ "$NAME" == "product" ]; then
+                     echo "# Alioth Port Params" >> "$PROP"
+                     echo "ro.product.product.name=alioth" >> "$PROP"
+                     echo "ro.product.product.device=alioth" >> "$PROP"
+                     echo "ro.product.product.model=M2012K11AC" >> "$PROP"
+                     echo "ro.product.board=alioth" >> "$PROP"
+                  fi
+               fi
+               
+               # 3. device_features для product
                if [ "$NAME" == "product" ]; then
-                   
-                   # Inject alioth.xml
                    if [ -f "$ASSETS/alioth.xml" ]; then
-                      TARGET_DIR="extracted/etc/device_features"
-                      mkdir -p "$TARGET_DIR"
-                      cp "$ASSETS/alioth.xml" "$TARGET_DIR/"
-                      find "$TARGET_DIR" -type f -name "*.xml" ! -name "alioth.xml" -delete
+                      echo "   -> Injecting alioth.xml..."
+                      mkdir -p "extracted/etc/device_features"
+                      cp "$ASSETS/alioth.xml" "extracted/etc/device_features/"
+                      find "extracted/etc/device_features" -type f -name "*.xml" ! -name "alioth.xml" -delete
                    fi
-
-                   # Patch build.prop
-                   PROP=$(find extracted -name "build.prop" | head -n 1)
-                   if [ -f "$PROP" ]; then
-                      echo >> "$PROP"
-                      echo "# Alioth Port Params" >> "$PROP"
-                      echo "ro.product.product.name=alioth" >> "$PROP"
-                      echo "ro.product.product.device=alioth" >> "$PROP"
-                      echo "ro.product.product.model=M2012K11AC" >> "$PROP"
-                      echo "ro.product.board=alioth" >> "$PROP"
-                   fi
-
-                   # Debloating
-                   echo "   -> Debloating..."
-                   sudo rm -rf extracted/data-app/*
-                   sudo rm -rf extracted/app/AnalyticsCore
-                   sudo rm -rf extracted/app/MSA
-                   sudo rm -rf extracted/app/MiVideoGlobal
-                   sudo rm -rf extracted/app/Facebook*
-                   sudo rm -rf extracted/priv-app/Facebook*
                fi
 
+               # Repack
                OUTPUT_IMG="$FINAL/${NAME}.img"
-               
                if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
                   mkfs.erofs -zlz4hc -C16384 "$OUTPUT_IMG" extracted
                else
                   SIZE_MB=$(du -sm extracted | awk '{print $1+100}')
-                  if command -v make_ext4fs >/dev/null; then
-                      make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
-                  else
-                      truncate -s ${SIZE_MB}M raw.img
-                      mke2fs -t ext4 -b 4096 -L $NAME -M /$NAME -O ^has_journal -d extracted raw.img
-                      img2simg raw.img "$OUTPUT_IMG"
-                      rm raw.img
-                  fi
+                  make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
                fi
                rm -rf extracted
             fi
@@ -220,61 +229,38 @@ jobs:
           repack product
           repack mi_ext
 
-      # 5. Установка OrangeFox (FAIL-SAFE)
+      # 5. Патч boot
       - name: Inject OrangeFox Recovery
         run: |
           cd "$GITHUB_WORKSPACE/workspace/final/images"
-          
-          echo ">>> Downloading OrangeFox..."
-          # Используем aria2c, так как он лучше обрабатывает редиректы
-          # Добавляем "|| true", чтобы ошибка скачивания НЕ ОСТАНАВЛИВАЛА скрипт
-          aria2c -o ofox.zip "https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip" || true
-          
+          wget -q "https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip" -O ofox.zip || true
           if [ -f ofox.zip ]; then
-             unzip -q ofox.zip recovery.img
-             rm ofox.zip
+             unzip -q ofox.zip recovery.img && rm ofox.zip
           fi
           
           if [ -f recovery.img ]; then
-             echo ">>> ✅ OrangeFox downloaded! Using as boot.img..."
+             echo ">>> Using OrangeFox..."
              mv recovery.img boot.img
-             
-             echo ">>> Patching OrangeFox (Permissive)..."
-             magiskboot unpack boot.img
-             if [ -f header ]; then
-                if ! grep -q "androidboot.selinux=permissive" header; then
-                    sed -i 's/$/ androidboot.selinux=permissive/' header
-                fi
-             fi
-             magiskboot repack boot.img
-             mv new-boot.img boot.img
-             rm -f header kernel ramdisk.cpio dtb
           else
-             echo ">>> ⚠️ OrangeFox download failed! Reverting to Stock Boot..."
-             # Если OFox не скачался, берем родное ядро
+             echo "⚠️ OFox failed. Using stock boot."
              mv boot_stock.img boot.img
-             
-             # Но его тоже надо пропатчить на Permissive, чтобы порт запустился!
-             echo ">>> Patching Stock Boot (Permissive)..."
-             magiskboot unpack boot.img
-             if [ -f header ]; then
-                if ! grep -q "androidboot.selinux=permissive" header; then
-                    sed -i 's/$/ androidboot.selinux=permissive/' header
-                fi
-             fi
-             magiskboot repack boot.img
-             mv new-boot.img boot.img
-             rm -f header kernel ramdisk.cpio dtb
           fi
           
-          # Удаляем бэкап, он больше не нужен
-          rm -f boot_stock.img
+          echo ">>> Patching boot (Permissive)..."
+          magiskboot unpack boot.img
+          if [ -f header ]; then
+             if ! grep -q "androidboot.selinux=permissive" header; then
+                 sed -i 's/$/ androidboot.selinux=permissive/' header
+             fi
+          fi
+          magiskboot repack boot.img
+          mv new-boot.img boot.img
+          rm -f header kernel ramdisk.cpio dtb
 
-      # 6. Упаковка
+      # 6. Упаковка и релиз
       - name: Pack ZIP
         run: |
           cd "$GITHUB_WORKSPACE/workspace/final"
-          
           wget -q https://dl.google.com/android/repository/platform-tools-latest-windows.zip -O tools.zip
           unzip -q tools.zip
           cp -r platform-tools/* .
@@ -283,50 +269,19 @@ jobs:
           cat <<EOF > flash_all.bat
           @echo off
           echo Starting Flash Process...
-          
-          if not exist fastboot.exe (
-              echo ERROR: fastboot.exe not found!
-              pause
-              exit
-          )
-
-          echo STEP 1: Flashing Boot...
           fastboot flash boot images/boot.img
-          echo Flashing DTBO/VBMETA...
           fastboot flash dtbo images/dtbo.img
           fastboot --disable-verity --disable-verification flash vbmeta images/vbmeta.img
-
-          echo.
-          echo STEP 2: Rebooting to FASTBOOTD...
           fastboot reboot fastboot
           echo Waiting 15 seconds for FastbootD...
           timeout /t 15 /nobreak > nul
-
-          echo.
-          echo STEP 3: Flashing System...
-          echo flashing vendor...
           fastboot flash vendor images/vendor.img
-          if exist images\odm.img (
-              echo flashing odm...
-              fastboot flash odm images/odm.img
-          )
-          echo flashing system...
+          if exist images\odm.img fastboot flash odm images/odm.img
           fastboot flash system images/system.img
-          echo flashing system_ext...
           fastboot flash system_ext images/system_ext.img
-          echo flashing product...
           fastboot flash product images/product.img
-          if exist images\mi_ext.img (
-              echo flashing mi_ext...
-              fastboot flash mi_ext images/mi_ext.img
-          )
-
-          echo.
-          echo STEP 4: Wiping Data...
+          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
           fastboot -w
-
-          echo.
-          echo Done! Rebooting...
           fastboot reboot
           pause
           EOF
