@@ -1,17 +1,14 @@
-name: Poco F3 Port (FINAL VERSION)
+name: Alioth Universal Port (A14-A16 + super)
 
 on:
   workflow_dispatch:
     inputs:
       stock_url:
-        description: 'STOCK Fastboot ROM (alioth)'
         required: true
       port_url:
-        description: 'PORT Fastboot ROM (donor)'
         required: true
       rom_name:
-        description: 'ZIP name'
-        default: 'Alioth_Port_Final'
+        default: Alioth_Universal_A14+
 
 permissions:
   contents: write
@@ -23,277 +20,118 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. Очистка места
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
+      - uses: jlumbroso/free-disk-space@main
 
-      # 2. Установка инструментов
       - name: Install tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 p7zip-full git file unzip \
+          sudo apt update
+          sudo apt install -y aria2 p7zip-full unzip \
             android-sdk-libsparse-utils erofs-utils \
-            build-essential liblz4-dev liblzma-dev uuid-dev e2fsprogs
+            e2fsprogs build-essential
 
-          # lpunpack
-          wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O lpunpack
-          chmod +x lpunpack && sudo mv lpunpack /usr/local/bin/
-
-          # make_ext4fs
-          if wget -q https://github.com/twrpdtgen/binaries/raw/master/linux/x86/make_ext4fs -O make_ext4fs; then
-             chmod +x make_ext4fs
-             sudo mv make_ext4fs /usr/local/bin/
-          fi
-
-          # Magiskboot
-          wget -q https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk
-          unzip -q Magisk-v27.0.apk -d magisk
-          cp magisk/lib/x86_64/libmagiskboot.so magiskboot
-          chmod +x magiskboot && sudo mv magiskboot /usr/local/bin/
-          rm -rf magisk Magisk-v27.0.apk
+          wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpunpack -O /usr/local/bin/lpunpack
+          wget -q https://raw.githubusercontent.com/LineageOS/android_prebuilts_extract-tools/lineage-21.0/linux-x86/bin/lpmake -O /usr/local/bin/lpmake
+          chmod +x /usr/local/bin/lp*
 
       - name: Prepare workspace
-        run: mkdir -p workspace/{stock,port,final/images,assets,repack_source}
+        run: mkdir -p ws/{stock,port,src,out}
 
-      # 3. Обработка STOCK
-      - name: Process STOCK
+      # ===== STOCK =====
+      - name: Extract STOCK
         run: |
-          WS="$GITHUB_WORKSPACE/workspace"
-          FINAL="$WS/final/images"
-          REPACK_SRC="$WS/repack_source"
-          ASSETS="$WS/assets"
-          
-          cd "$WS/stock"
-          aria2c -x4 -s4 "${{ inputs.stock_url }}" -o stock.tgz
-          tar -xf stock.tgz && rm stock.tgz
+          cd ws/stock
+          aria2c ${{ inputs.stock_url }} -o stock.tgz
+          tar -xf stock.tgz
+          simg2img images/super.img super.raw
+          lpunpack super.raw .
+          cp boot.img dtbo.img vbmeta.img ../out/
+          mv vendor*.img odm*.img ../src/
+          mv product*.img ../src/stock_product.img
 
-          IMG_DIR=$(find . -type d -name "images" | head -n1)
-          if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "boot.img" -printf "%h\n" | head -n1); fi
-          cd "$IMG_DIR"
-
-          SUPER=$(find . -name "super.img" | head -n1)
-          if [ -f "$SUPER" ]; then
-             simg2img "$SUPER" super.raw
-             lpunpack super.raw .
-             rm super.raw
-          fi
-
-          # Сохраняем boot/dtbo/vbmeta
-          cp boot.img "$FINAL/boot_stock.img"
-          cp dtbo.img "$FINAL/"
-          cp vbmeta.img "$FINAL/"
-          
-          # Перемещаем vendor/odm/product для дальнейшей обработки
-          find . -name "vendor*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/vendor.img"
-          find . -name "odm*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/odm.img" || true
-          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/stock_product.img"
-
-      # 4. Обработка PORT
-      - name: Process PORT & Repack
+      # ===== PORT =====
+      - name: Extract PORT
         run: |
-          WS="$GITHUB_WORKSPACE/workspace"
-          REPACK_SRC="$WS/repack_source"
-          FINAL="$WS/final/images"
-          ASSETS="$WS/assets"
-          
-          cd "$WS/port"
-          aria2c -x4 -s4 "${{ inputs.port_url }}" -o port.tgz
-          tar -xf port.tgz && rm port.tgz
+          cd ws/port
+          aria2c ${{ inputs.port_url }} -o port.tgz
+          tar -xf port.tgz
+          simg2img images/super.img super.raw
+          lpunpack super.raw .
+          mv system*.img system_ext*.img product*.img ../src/
 
-          IMG_DIR=$(find . -type d -name "images" | head -n1)
-          if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "system.img" -printf "%h\n" | head -n1); fi
-          if [ -z "$IMG_DIR" ]; then IMG_DIR=$(find . -name "super.img" -printf "%h\n" | head -n1); fi
-          cd "$IMG_DIR"
-          
-          SUPER=$(find . -name "super.img" | head -n1)
-          if [ -f "$SUPER" ]; then
-             simg2img "$SUPER" super.raw
-             lpunpack super.raw .
-             rm super.raw
-          fi
-          
-          # Перемещаем файлы порта
-          find . -name "system*.img" -not -name "*ext*" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system.img"
-          find . -name "system_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/system_ext.img"
-          find . -name "product*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/port_product.img"
-          find . -name "mi_ext*.img" -printf "%s %p\n" | sort -n | tail -1 | awk '{print $2}' | xargs -I {} mv {} "$REPACK_SRC/mi_ext.img" || true
+      # ===== REPACK =====
+      - name: Repack images
+        run: |
+          set -e
+          cd ws/src
 
-          # === НАЧИНАЕМ ПЕРЕПАКОВКУ ===
-          cd "$REPACK_SRC"
-          
-          # --- СНАЧАЛА ИЗВЛЕКАЕМ ИНФОРМАЦИЮ О ВЕРСИЯХ ---
-          echo ">>> Analyzing versions..."
-          # Распаковываем product от порта, чтобы узнать его версию Android и патч безопасности
-          fsck.erofs --extract=port_product_fs port_product.img || 7z x port_product.img -oport_product_fs >/dev/null
-          
-          # Находим build.prop и извлекаем нужные строки
-          PORT_PROP=$(find port_product_fs -name "build.prop" | head -n 1)
-          PORT_ANDROID_VERSION=$(grep "ro.product.build.version.release" "$PORT_PROP" | head -n 1 | awk -F'=' '{print $2}')
-          PORT_SECURITY_PATCH=$(grep "ro.build.version.security_patch" "$PORT_PROP" | head -n 1 | awk -F'=' '{print $2}')
-          
-          echo ">>> Port Android Version: $PORT_ANDROID_VERSION"
-          echo ">>> Port Security Patch: $PORT_SECURITY_PATCH"
-          
-          # Определяем FS стока по его product.img
-          if fsck.erofs --extract=stock_product_fs stock_product.img; then
-             echo "STOCK_FS=erofs" >> $GITHUB_ENV
-          else
-             echo "STOCK_FS=ext4" >> $GITHUB_ENV
-             7z x stock_product.img -ostock_product_fs
-          fi
-
-          # Сохраняем fstab и alioth.xml
-          find stock_product_fs -name "fstab.*" -exec cp {} "$ASSETS/" \; || true
-          find stock_product_fs -name "alioth.xml" -exec cp {} "$ASSETS/" \; || true
-          rm -rf stock_product_fs # Больше не нужен
-
-          # --- Функция перепаковки ---
-          repack() {
-            NAME=$1
-            IMG_NAME="${NAME}.img"
-            # Для product используем файл от порта
-            if [ "$NAME" == "product" ]; then IMG_NAME="port_product.img"; fi
-            
-            if [ -f "$IMG_NAME" ]; then
-               echo ">>> Processing $NAME..."
-               rm -rf extracted && mkdir extracted
-               
-               if ! fsck.erofs --extract=extracted "$IMG_NAME" 2>/dev/null; then
-                  7z x "$IMG_NAME" -oextracted > /dev/null
-               fi
-               rm "$IMG_NAME"
-
-               # --- НАЧИНАЕМ ПАТЧИТЬ ---
-               # 1. fstab
-               if [ -f "$ASSETS/fstab.qcom" ]; then
-                  find extracted -name "fstab.*" -delete
-                  cp "$ASSETS"/fstab.* extracted/etc/ 2>/dev/null || true
-                  mkdir -p extracted/vendor/etc 2>/dev/null || true
-                  cp "$ASSETS"/fstab.* extracted/vendor/etc/ 2>/dev/null || true
-               fi
-               
-               # 2. Патчим build.prop (для VENDOR и PRODUCT)
-               PROP=$(find extracted -name "build.prop" | head -n 1)
-               if [ -f "$PROP" ]; then
-                  echo "   -> Patching build.prop for $NAME..."
-                  # Меняем версию Android и патч на те, что у порта
-                  sed -i "s/ro.vendor.build.version.release=.*/ro.vendor.build.version.release=$PORT_ANDROID_VERSION/" "$PROP"
-                  sed -i "s/ro.vendor.build.version.security_patch=.*/ro.vendor.build.version.security_patch=$PORT_SECURITY_PATCH/" "$PROP"
-                  sed -i "s/ro.product.build.version.release=.*/ro.product.build.version.release=$PORT_ANDROID_VERSION/" "$PROP"
-                  sed -i "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PORT_SECURITY_PATCH/" "$PROP"
-                  
-                  # Если это product, добавляем инфу о девайсе
-                  if [ "$NAME" == "product" ]; then
-                     echo "# Alioth Port Params" >> "$PROP"
-                     echo "ro.product.product.name=alioth" >> "$PROP"
-                     echo "ro.product.product.device=alioth" >> "$PROP"
-                     echo "ro.product.product.model=M2012K11AC" >> "$PROP"
-                     echo "ro.product.board=alioth" >> "$PROP"
-                  fi
-               fi
-               
-               # 3. device_features для product
-               if [ "$NAME" == "product" ]; then
-                   if [ -f "$ASSETS/alioth.xml" ]; then
-                      echo "   -> Injecting alioth.xml..."
-                      mkdir -p "extracted/etc/device_features"
-                      cp "$ASSETS/alioth.xml" "extracted/etc/device_features/"
-                      find "extracted/etc/device_features" -type f -name "*.xml" ! -name "alioth.xml" -delete
-                   fi
-               fi
-
-               # Repack
-               OUTPUT_IMG="$FINAL/${NAME}.img"
-               if [ "${{ env.STOCK_FS }}" = "erofs" ]; then
-                  mkfs.erofs -zlz4hc -C16384 "$OUTPUT_IMG" extracted
-               else
-                  SIZE_MB=$(du -sm extracted | awk '{print $1+100}')
-                  make_ext4fs -s -L $NAME -l ${SIZE_MB}M -a $NAME "$OUTPUT_IMG" extracted/
-               fi
-               rm -rf extracted
-            fi
+          extract() {
+            rm -rf out && mkdir out
+            fsck.erofs --extract=out "$1" || 7z x "$1" -oout
           }
 
-          repack vendor
-          repack odm
-          repack system
-          repack system_ext
-          repack product
-          repack mi_ext
+          extract product*.img
+          PROP=$(find out -name build.prop | head -n1)
+          ANDROID=$(grep ro.build.version.release $PROP | cut -d= -f2)
+          PATCH=$(grep ro.build.version.security_patch $PROP | cut -d= -f2)
+          rm -rf out
 
-      # 5. Патч boot
-      - name: Inject OrangeFox Recovery
+          clean_oem() {
+            rm -rf out/overlay out/product/overlay
+            rm -rf out/priv-app/*Color* out/priv-app/*Oppo* out/priv-app/*Meizu*
+            rm -rf out/etc/init/*.rc
+          }
+
+          repack() {
+            NAME=$1
+            extract "$2"
+            clean_oem
+            PROP=$(find out -name build.prop | head -n1)
+            sed -i "s/ro.build.version.release=.*/ro.build.version.release=$ANDROID/" $PROP
+            sed -i "s/ro.build.version.security_patch=.*/ro.build.version.security_patch=$PATCH/" $PROP
+            [ "$NAME" = "product" ] && cat >> $PROP <<EOF
+ro.product.device=alioth
+ro.product.model=M2012K11AC
+ro.product.name=alioth
+EOF
+            mkfs.erofs -zlz4hc ../out/$NAME.img out
+            rm -rf out
+          }
+
+          repack system system*.img
+          [ -f system_ext*.img ] && repack system_ext system_ext*.img
+          repack product product*.img
+
+          cp vendor*.img odm*.img ../out/
+
+      # ===== SUPER =====
+      - name: Build super.img
         run: |
-          cd "$GITHUB_WORKSPACE/workspace/final/images"
-          wget -q "https://downloads.sourceforge.net/project/orangefox/alioth/OrangeFox-R11.1_6_A12-Stable-alioth.zip" -O ofox.zip || true
-          if [ -f ofox.zip ]; then
-             unzip -q ofox.zip recovery.img && rm ofox.zip
-          fi
-          
-          if [ -f recovery.img ]; then
-             echo ">>> Using OrangeFox..."
-             mv recovery.img boot.img
-          else
-             echo "⚠️ OFox failed. Using stock boot."
-             mv boot_stock.img boot.img
-          fi
-          
-          echo ">>> Patching boot (Permissive)..."
-          magiskboot unpack boot.img
-          if [ -f header ]; then
-             if ! grep -q "androidboot.selinux=permissive" header; then
-                 sed -i 's/$/ androidboot.selinux=permissive/' header
-             fi
-          fi
-          magiskboot repack boot.img
-          mv new-boot.img boot.img
-          rm -f header kernel ramdisk.cpio dtb
+          cd ws/out
+          lpmake \
+            --metadata-size 65536 \
+            --super-name super \
+            --device super:9126805504 \
+            --group main:9126805504 \
+            --partition system:readonly:$(stat -c%s system.img):main \
+            --image system=system.img \
+            --partition system_ext:readonly:$(stat -c%s system_ext.img):main \
+            --image system_ext=system_ext.img \
+            --partition product:readonly:$(stat -c%s product.img):main \
+            --image product=product.img \
+            --partition vendor:readonly:$(stat -c%s vendor.img):main \
+            --image vendor=vendor.img \
+            --partition odm:readonly:$(stat -c%s odm.img):main \
+            --image odm=odm.img \
+            --output super.img
 
-      # 6. Упаковка и релиз
+      # ===== ZIP =====
       - name: Pack ZIP
         run: |
-          cd "$GITHUB_WORKSPACE/workspace/final"
-          wget -q https://dl.google.com/android/repository/platform-tools-latest-windows.zip -O tools.zip
-          unzip -q tools.zip
-          cp -r platform-tools/* .
-          rm -rf platform-tools tools.zip
-
-          cat <<EOF > flash_all.bat
-          @echo off
-          echo Starting Flash Process...
-          fastboot flash boot images/boot.img
-          fastboot flash dtbo images/dtbo.img
-          fastboot --disable-verity --disable-verification flash vbmeta images/vbmeta.img
-          fastboot reboot fastboot
-          echo Waiting 15 seconds for FastbootD...
-          timeout /t 15 /nobreak > nul
-          fastboot flash vendor images/vendor.img
-          if exist images\odm.img fastboot flash odm images/odm.img
-          fastboot flash system images/system.img
-          fastboot flash system_ext images/system_ext.img
-          fastboot flash product images/product.img
-          if exist images\mi_ext.img fastboot flash mi_ext images/mi_ext.img
-          fastboot -w
-          fastboot reboot
-          pause
-          EOF
-
-          ZIP="${{ inputs.rom_name }}.zip"
-          sudo 7z a -tzip -mx1 -v2000m "$ZIP" .
-          sudo chown $USER:$USER "$ZIP"*
-          
-          echo "TAG=v$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_ENV
+          cd ws
+          7z a ${{ inputs.rom_name }}.zip out
 
       - uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ env.TAG }}
-          name: Alioth Port ${{ env.TAG }}
-          files: workspace/final/${{ inputs.rom_name }}.zip.*
+          tag_name: v$(date +%Y%m%d)
+          files: ws/${{ inputs.rom_name }}.zip
+          
